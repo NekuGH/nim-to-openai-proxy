@@ -227,37 +227,48 @@ function safeWrite(res, data) {
 
 async function callWithFallback(baseRequest, models) {
   let lastError = null;
+  const RETRYABLE_STATUSES = [429, 529];
+  const MAX_RETRIES = 2;
+  const RETRY_DELAY_MS = 4000;
 
   for (const model of models) {
-    try {
-      const res = await axios.post(
-        `${NIM_API_BASE}/chat/completions`,
-        { ...baseRequest, model },
-        {
-          headers: {
-            Authorization: `Bearer ${NIM_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          responseType: baseRequest.stream ? 'stream' : 'json',
-          timeout: REQUEST_TIMEOUT_MS
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const res = await axios.post(
+          `${NIM_API_BASE}/chat/completions`,
+          { ...baseRequest, model },
+          {
+            headers: {
+              Authorization: `Bearer ${NIM_API_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            responseType: baseRequest.stream ? 'stream' : 'json',
+            timeout: REQUEST_TIMEOUT_MS
+          }
+        );
+
+        return { response: res, model };
+
+      } catch (err) {
+        lastError = err;
+        const status = err.response?.status;
+        console.warn(
+          `[FALLBACK] Model failed: ${model} (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
+          status,
+          err.response?.data?.error?.message || err.message
+        );
+
+        if (RETRYABLE_STATUSES.includes(status) && attempt < MAX_RETRIES) {
+          await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+        } else {
+          break;
         }
-      );
-
-      return { response: res, model };
-
-    } catch (err) {
-      lastError = err;
-      console.warn(
-        `[FALLBACK] Model failed: ${model}`,
-        err.response?.status,
-        err.response?.data?.error?.message || err.message
-      );
+      }
     }
   }
 
   throw lastError || new Error('All models failed');
 }
-
 // ─── Routes ────────────────────────────────────────────────────────────────
 
 app.get('/health', (req, res) => {
