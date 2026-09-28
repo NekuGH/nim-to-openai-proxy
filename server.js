@@ -21,6 +21,9 @@ const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
 const ENABLE_THINKING_MODE = process.env.ENABLE_THINKING_MODE === 'true';
 const SKIP_VALIDATION = process.env.SKIP_VALIDATION === 'true';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+const GLM_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.GLM_REASONING_EFFORT)
+  ? process.env.GLM_REASONING_EFFORT
+  : 'low';
 
 const MAX_TOKENS_LIMIT = 65536;
 const REQUEST_TIMEOUT_MS = 180000;
@@ -29,6 +32,7 @@ const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
 
 if (SHOW_REASONING) console.log('[CONFIG] Reasoning display: ENABLED');
 if (ENABLE_THINKING_MODE) console.log('[CONFIG] Thinking mode: ENABLED');
+console.log(`[CONFIG] GLM-5.3 reasoning effort: ${GLM_REASONING_EFFORT}`);
 
 // ─── Config validation ──────────────────────────────────────────────────────
 
@@ -49,37 +53,29 @@ validateConfig();
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/nemotron-3-super-120b-a12b',
   'gpt-4': 'nvidia/nemotron-3-ultra-550b-a55b',
-  'gpt-3.5': 'qwen/qwen3.5-397b-a17b',
-  'gpt-4-turbo': 'moonshotai/kimi-k2.6',
   'gpt-4o': 'deepseek-ai/deepseek-v4-pro-0813',
-  'claude-3-opus': 'openai/gpt-oss-120b',
-  'claude-3-sonnet': 'openai/gpt-oss-20b',
   'gemini-pro': 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-  'gemini-turbo': 'meta/llama-3.3-70b-instruct',
-  'gemini-turbo?': 'abacusai/dracarys-llama-3.1-70b-instruct',
   'gpt-3.5o': 'nvidia/nemotron-mini-4b-instruct',
   'gpt-4-flash': 'deepseek-ai/deepseek-v4-flash',
-  'glm-5.2': 'z-ai/glm-5.2',
-  'mistral': 'mistralai/mistral-large-3-675b-instruct-2512',
-  'mistral-turbo': 'mistralai/mistral-medium-3.5-128b',
-  'mistral-pro': 'mistralai/mistral-small-4-119b-2603',
-  'mistral-nemo': 'mistralai/mistral-nemotron',
-  'mistral-fast': 'mistralai/ministral-14b-instruct-2512',
-  'google-light': 'google/gemma-4-31b-it',
-  'google-lightest': 'google/gemma-2-2b-it',
-  'google-lighter': 'google/gemma-3n-e4b-it',
-  'm2.7': 'minimaxai/minimax-m2.7',
-  'm3': 'minimaxai/minimax-m3',
-  'step-3.5-flash': 'stepfun-ai/step-3.5-flash',
-  'step-3.7-flash': 'stepfun-ai/step-3.7-flash'
+  'glm-5.2': 'z-ai/glm-5.3'
 };
 
-const FALLBACK_MODELS = [
-  'mistralai/mistral-medium-3.5-128b',
-  'mistralai/mistral-small-4-119b-2603',
-  'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-  'google/gemma-4-31b-it'
-];
+// ─── Per-model request options ─────────────────────────────────────────────
+
+// GLM-5.3 always thinks before answering; its chat template has no off switch.
+// Never send enable_thinking: false to it — the template ignores it and the
+// reasoning then leaks into the reply. reasoning_effort (low/high/max, default
+// max) controls how long it thinks; clear_thinking is Z.ai's advice for chat.
+// Thinking counts against max_tokens, so extra room is added for it.
+const MODEL_OPTIONS = {
+  'z-ai/glm-5.3': {
+    chat_template_kwargs: {
+      reasoning_effort: GLM_REASONING_EFFORT,
+      clear_thinking: true
+    },
+    reasoningTokens: { low: 4096, high: 8192, max: 16384 }[GLM_REASONING_EFFORT]
+  }
+};
 
 // ─── Middleware ─────────────────────────────────────────────────────────────
 
@@ -223,52 +219,46 @@ function safeWrite(res, data) {
   return false;
 }
 
-// ─── Helper: Fallback Chain ─────────────────────────────────────────────────
+// ─── Helper: Upstream Call ──────────────────────────────────────────────────
 
-async function callWithFallback(baseRequest, models) {
-  let lastError = null;
+// Calls exactly one model and never switches to a different one. The same
+// model is only retried when NIM is rate-limited (429) or overloaded (529).
+async function callModel(baseRequest, model) {
   const RETRYABLE_STATUSES = [429, 529];
   const MAX_RETRIES = 2;
   const RETRY_DELAY_MS = 4000;
 
-  for (const model of models) {
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        const res = await axios.post(
-          `${NIM_API_BASE}/chat/completions`,
-          { ...baseRequest, model },
-          {
-            headers: {
-              Authorization: `Bearer ${NIM_API_KEY}`,
-              'Content-Type': 'application/json'
-            },
-            responseType: baseRequest.stream ? 'stream' : 'json',
-            timeout: REQUEST_TIMEOUT_MS
-          }
-        );
-
-        return { response: res, model };
-
-      } catch (err) {
-        lastError = err;
-        const status = err.response?.status;
-        console.warn(
-          `[FALLBACK] Model failed: ${model} (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
-          status,
-          err.response?.data?.error?.message || err.message
-        );
-
-        if (RETRYABLE_STATUSES.includes(status) && attempt < MAX_RETRIES) {
-          await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
-        } else {
-          break;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await axios.post(
+        `${NIM_API_BASE}/chat/completions`,
+        { ...baseRequest, model },
+        {
+          headers: {
+            Authorization: `Bearer ${NIM_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          responseType: baseRequest.stream ? 'stream' : 'json',
+          timeout: REQUEST_TIMEOUT_MS
         }
+      );
+
+    } catch (err) {
+      const status = err.response?.status;
+      console.warn(
+        `[PROXY] Model failed: ${model} (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
+        status,
+        err.response?.data?.error?.message || err.message
+      );
+
+      if (!RETRYABLE_STATUSES.includes(status) || attempt >= MAX_RETRIES) {
+        throw err;
       }
+      await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
     }
   }
-
-  throw lastError || new Error('All models failed');
 }
+
 // ─── Routes ────────────────────────────────────────────────────────────────
 
 app.get('/health', (req, res) => {
@@ -300,22 +290,33 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream
     } = req.body;
 
-    const primaryModel = MODEL_MAPPING[model] || 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
-    const modelChain = [primaryModel];
+    // No default model: an unknown alias is an error, never a silent swap
+    const nimModel = MODEL_MAPPING[model];
+    if (!nimModel) {
+      return res.status(400).json({
+        error: {
+          message: `Unknown model "${model}". Available models: ${Object.keys(MODEL_MAPPING).join(', ')}`,
+          type: 'invalid_request_error',
+          code: 'model_not_found'
+        }
+      });
+    }
+    const modelOptions = MODEL_OPTIONS[nimModel] || {};
 
     const baseRequest = {
       messages,
       temperature: temperature ?? 0.7,
-      max_tokens: Math.min(max_tokens ?? 2048, MAX_TOKENS_LIMIT),
+      max_tokens: Math.min((max_tokens ?? 2048) + (modelOptions.reasoningTokens || 0), MAX_TOKENS_LIMIT),
       stream: stream || false,
+      chat_template_kwargs: modelOptions.chat_template_kwargs,
       extra_body: ENABLE_THINKING_MODE
         ? { chat_template_kwargs: { thinking: true } }
         : undefined
     };
 
-    const { response, model: usedModel } = await callWithFallback(baseRequest, modelChain);
+    const response = await callModel(baseRequest, nimModel);
     upstreamStream = response.data;
-    console.log('[PROXY] Model used:', usedModel);
+    console.log('[PROXY] Model used:', nimModel);
 
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream');
@@ -355,7 +356,8 @@ app.post('/v1/chat/completions', async (req, res) => {
 
           if (delta) {
             let content = delta.content || '';
-            const reasoning = delta.reasoning_content;
+            // Some NIM backends name the field "reasoning" instead of "reasoning_content"
+            const reasoning = delta.reasoning_content ?? delta.reasoning;
 
             if (SHOW_REASONING) {
               if (reasoning && !reasoningOpen) {
@@ -366,13 +368,15 @@ app.post('/v1/chat/completions', async (req, res) => {
               }
 
               if (delta.content && reasoningOpen) {
-                content += `\n</thinking>\n\n${delta.content}`;
+                // Without reasoning in this chunk, content already holds delta.content
+                content = `${reasoning ? content : ''}\n</thinking>\n\n${delta.content}`;
                 reasoningOpen = false;
               }
             }
 
             delta.content = content;
             delete delta.reasoning_content;
+            delete delta.reasoning;
           }
 
           safeWrite(res, `data: ${JSON.stringify(data)}\n\n`);
@@ -476,9 +480,10 @@ app.post('/v1/chat/completions', async (req, res) => {
         model: model,
         choices: (response.data.choices || []).map((choice, i) => {
           let content = choice.message?.content || '';
+          const reasoning = choice.message?.reasoning_content ?? choice.message?.reasoning;
 
-          if (SHOW_REASONING && choice.message?.reasoning_content) {
-            const safeReasoning = choice.message.reasoning_content.replace(/\n/g, '\\n');
+          if (SHOW_REASONING && reasoning) {
+            const safeReasoning = reasoning.replace(/\n/g, '\\n');
             content = `<thinking>\n${safeReasoning}\n</thinking>\n\n${content}`;
           }
 
