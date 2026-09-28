@@ -53,30 +53,11 @@ validateConfig();
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/nemotron-3-super-120b-a12b',
   'gpt-4': 'nvidia/nemotron-3-ultra-550b-a55b',
-  'gpt-3.5': 'qwen/qwen3.5-397b-a17b',
-  'gpt-4-turbo': 'moonshotai/kimi-k2.6',
   'gpt-4o': 'deepseek-ai/deepseek-v4-pro-0813',
-  'claude-3-opus': 'openai/gpt-oss-120b',
-  'claude-3-sonnet': 'openai/gpt-oss-20b',
   'gemini-pro': 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-  'gemini-turbo': 'meta/llama-3.3-70b-instruct',
-  'gemini-turbo?': 'abacusai/dracarys-llama-3.1-70b-instruct',
   'gpt-3.5o': 'nvidia/nemotron-mini-4b-instruct',
   'gpt-4-flash': 'deepseek-ai/deepseek-v4-flash',
-  'glm-5.2': 'z-ai/glm-5.2',
-  'glm-5.3': 'z-ai/glm-5.3',
-  'mistral': 'mistralai/mistral-large-3-675b-instruct-2512',
-  'mistral-turbo': 'mistralai/mistral-medium-3.5-128b',
-  'mistral-pro': 'mistralai/mistral-small-4-119b-2603',
-  'mistral-nemo': 'mistralai/mistral-nemotron',
-  'mistral-fast': 'mistralai/ministral-14b-instruct-2512',
-  'google-light': 'google/gemma-4-31b-it',
-  'google-lightest': 'google/gemma-2-2b-it',
-  'google-lighter': 'google/gemma-3n-e4b-it',
-  'm2.7': 'minimaxai/minimax-m2.7',
-  'm3': 'minimaxai/minimax-m3',
-  'step-3.5-flash': 'stepfun-ai/step-3.5-flash',
-  'step-3.7-flash': 'stepfun-ai/step-3.7-flash'
+  'glm-5.2': 'z-ai/glm-5.3'
 };
 
 // ─── Per-model request options ─────────────────────────────────────────────
@@ -95,13 +76,6 @@ const MODEL_OPTIONS = {
     reasoningTokens: { low: 4096, high: 8192, max: 16384 }[GLM_REASONING_EFFORT]
   }
 };
-
-const FALLBACK_MODELS = [
-  'mistralai/mistral-medium-3.5-128b',
-  'mistralai/mistral-small-4-119b-2603',
-  'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-  'google/gemma-4-31b-it'
-];
 
 // ─── Middleware ─────────────────────────────────────────────────────────────
 
@@ -245,52 +219,46 @@ function safeWrite(res, data) {
   return false;
 }
 
-// ─── Helper: Fallback Chain ─────────────────────────────────────────────────
+// ─── Helper: Upstream Call ──────────────────────────────────────────────────
 
-async function callWithFallback(baseRequest, models) {
-  let lastError = null;
+// Calls exactly one model and never switches to a different one. The same
+// model is only retried when NIM is rate-limited (429) or overloaded (529).
+async function callModel(baseRequest, model) {
   const RETRYABLE_STATUSES = [429, 529];
   const MAX_RETRIES = 2;
   const RETRY_DELAY_MS = 4000;
 
-  for (const model of models) {
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        const res = await axios.post(
-          `${NIM_API_BASE}/chat/completions`,
-          { ...baseRequest, model },
-          {
-            headers: {
-              Authorization: `Bearer ${NIM_API_KEY}`,
-              'Content-Type': 'application/json'
-            },
-            responseType: baseRequest.stream ? 'stream' : 'json',
-            timeout: REQUEST_TIMEOUT_MS
-          }
-        );
-
-        return { response: res, model };
-
-      } catch (err) {
-        lastError = err;
-        const status = err.response?.status;
-        console.warn(
-          `[FALLBACK] Model failed: ${model} (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
-          status,
-          err.response?.data?.error?.message || err.message
-        );
-
-        if (RETRYABLE_STATUSES.includes(status) && attempt < MAX_RETRIES) {
-          await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
-        } else {
-          break;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await axios.post(
+        `${NIM_API_BASE}/chat/completions`,
+        { ...baseRequest, model },
+        {
+          headers: {
+            Authorization: `Bearer ${NIM_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          responseType: baseRequest.stream ? 'stream' : 'json',
+          timeout: REQUEST_TIMEOUT_MS
         }
+      );
+
+    } catch (err) {
+      const status = err.response?.status;
+      console.warn(
+        `[PROXY] Model failed: ${model} (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
+        status,
+        err.response?.data?.error?.message || err.message
+      );
+
+      if (!RETRYABLE_STATUSES.includes(status) || attempt >= MAX_RETRIES) {
+        throw err;
       }
+      await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
     }
   }
-
-  throw lastError || new Error('All models failed');
 }
+
 // ─── Routes ────────────────────────────────────────────────────────────────
 
 app.get('/health', (req, res) => {
@@ -322,9 +290,18 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream
     } = req.body;
 
-    const primaryModel = MODEL_MAPPING[model] || 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
-    const modelChain = [primaryModel];
-    const modelOptions = MODEL_OPTIONS[primaryModel] || {};
+    // No default model: an unknown alias is an error, never a silent swap
+    const nimModel = MODEL_MAPPING[model];
+    if (!nimModel) {
+      return res.status(400).json({
+        error: {
+          message: `Unknown model "${model}". Available models: ${Object.keys(MODEL_MAPPING).join(', ')}`,
+          type: 'invalid_request_error',
+          code: 'model_not_found'
+        }
+      });
+    }
+    const modelOptions = MODEL_OPTIONS[nimModel] || {};
 
     const baseRequest = {
       messages,
@@ -337,9 +314,9 @@ app.post('/v1/chat/completions', async (req, res) => {
         : undefined
     };
 
-    const { response, model: usedModel } = await callWithFallback(baseRequest, modelChain);
+    const response = await callModel(baseRequest, nimModel);
     upstreamStream = response.data;
-    console.log('[PROXY] Model used:', usedModel);
+    console.log('[PROXY] Model used:', nimModel);
 
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream');

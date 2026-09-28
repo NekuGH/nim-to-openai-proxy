@@ -10,7 +10,7 @@ Due to personal health I will no longer be able to maintain this project. It has
 
 ### NVIDIA NIM to OpenAI Proxy
 Hello, this is my first ever project on Github that I am making public. This is essentially just a translation layer between the API format that NVIDIA NIM uses to the format OpenAI uses. I made this originally by building on a script from a Reddit guide. Over the time of a month I've iterated on it, fixed problems, added auth, more models, and removed/replaced deprecated models.
-These are the current available models for usage, and the use cases for all of them. (Note: The Google models are mostly for troubleshooting issues with latency and timeouts.)
+These are the current available models for usage, and the use cases for all of them.
 
 ### Why use this proxy?
 
@@ -29,36 +29,17 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 
 | Alias | Backend Model | Best For | Speed | Filters |
 |---|---|---|---|---|
-| `gpt-4-turbo` | `moonshotai/kimi-k2.6` | Deep, immersive RP | Medium | Medium-High |
 | `gpt-4` | `nvidia/nemotron-3-ultra-550b-a55b` | Immersive RP | Fast | Low |
-| `gpt-4o` | `deepseek-ai/deepseek-v4-pro` |
+| `gpt-4o` | `deepseek-ai/deepseek-v4-pro-0813` |
 | `gpt-4-flash` | `deepseek-ai/deepseek-v4-flash` | Fast, non-edgy RP | Fast | High |
 | `gpt-3.5o` | `nvidia/nemotron-mini-4b-instruct` | Lightweight RP, fast responses | Very Fast | Low |
 | `gemini-pro` | `nvidia/llama-3.3-nemotron-super-49b-v1.5` | Daily driver, low latency | Fast | Low |
-| `gemini-turbo` | `meta/llama-3.3-70b-instruct` | Fast general purpose | Fast | Low-Medium |
-| `gemini-turbo?` | `abacusai/dracarys-llama-3.1-70b-instruct` | Fine-tuned variant of above | Fast | Low-Medium |
-| `mistral` | `mistralai/mistral-large-3-675b-instruct-2512` | Best quality, unfiltered | Very Slow | Low |
-| `mistral-turbo` | `mistralai/mistral-medium-3.5-128b` | Fast fallback | Fast | Low |
-| `mistral-pro` | `mistralai/mistral-small-4-119b-2603` | Lightweight scenes | Very Fast | Low |
-| `mistral-fast` | `mistralai/ministral-14b-instruct-2512` | Fast, compact Mistral | Very Fast | Low |
-| `mistral-nemo` | `mistralai/mistral-nemotron` | Casual/anime RP | Fast | Low |
-| `claude-3-opus` | `openai/gpt-oss-120b` | Alternative to Chinese models | Medium | Low-Medium |
-| `claude-3-sonnet` | `openai/gpt-oss-20b` | Fast, distinct voice | Fast | Low-Medium |
-| `glm-5.2` | `z-ai/glm-5.2` | General purpose | Medium | Medium |
-| `glm-5.3` | `z-ai/glm-5.3` | Smartest GLM, always thinks first (see below) | Medium-Slow | Medium |
+| `glm-5.2` | `z-ai/glm-5.3` | General purpose, always thinks first (see below) | Medium-Slow | Medium |
 | `gpt-3.5-turbo` | `nvidia/nemotron-3-super-120b-a12b` | Lightweight tasks | Fast | Low |
-| `gpt-3.5` | `qwen/qwen3.5-397b-a17b` | Qwen fallback | Medium | Medium |
-| `google-light` | `google/gemma-4-31b-it` | Short scenes, fast | Fast | Low-Medium |
-| `google-lighter` | `google/gemma-3n-e4b-it` | Mostly testing only | Very Fast | Low-Medium |
-| `google-lightest` | `google/gemma-2-2b-it` | Testing only | Extremely fast | Low |
-| `m2.7` | `minimaxai/minimax-m2.7` | Experimental | Medium | Unknown (to me) |
-| `m3` | `minimaxai/minimax-m3` | Experimental | fast | Unknown (to me) |
-| `step-3.5-flash` | `stepfun-ai/step-3.5-flash` | Chinese creative model | Fast | Medium |
-| `step-3.7-flash` | `stepfun-ai/step-3.7-flash` | Chinese creative model | Fast | Medium |
 
 ### GLM-5.3 notes
 
-`glm-5.3` always thinks before it replies — the model has no way to switch this off. The proxy handles it for you:
+The `glm-5.2` alias now runs GLM-5.3, since NVIDIA retired GLM-5.2 — keep using `glm-5.2` as the model name. GLM-5.3 always thinks before it replies — the model has no way to switch this off. The proxy handles it for you:
 
 - The thinking is hidden from your chat (unless `SHOW_REASONING=true`), so you only see the reply. Expect a short pause before text starts appearing.
 - Thinking length is set by `GLM_REASONING_EFFORT`. `low` (default) is fastest and fine for RP; `high` and `max` think longer and are slower.
@@ -68,21 +49,16 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 
 | If your RP involves... | Avoid | Use instead |
 |---|---|---|
-| Dark themes, violence, mature content | `gpt-4o`, `gpt-4-flash`, `gpt-4-turbo` (They have high filters due to being based in China) | `mistral`, `gemini-pro`, `claude-3-opus` |
-| Fast responses needed | `mistral` (675B) | `gemini-pro`, `mistral-turbo`, `gpt-3.5o` |
-| Long context / memory | Anything under 30B | `gpt-4-turbo`, `mistral`, `gpt-4` |
-| Testing / very fast replies | — | `google-lightest`, `gpt-3.5o` |
+| Dark themes, violence, mature content | `gpt-4o`, `gpt-4-flash` (They have high filters due to being based in China) | `gpt-4`, `gemini-pro`, `gpt-3.5-turbo` |
+| Fast responses needed | `glm-5.2` (thinks before replying) | `gemini-pro`, `gpt-3.5o` |
+| Long context / memory | Anything under 30B | `gpt-4`, `glm-5.2` |
+| Testing / very fast replies | — | `gpt-3.5o` |
 
-### Fallback Chain
+### No Fallback
 
-If your requested model fails, the proxy automatically tries:
-1. Requested model
-2. `mistralai/mistral-medium-3.5-128b`
-3. `mistralai/mistral-small-4-119b-2603`
-4. `nvidia/llama-3.3-nemotron-super-49b-v1.5`
-5. `google/gemma-4-31b-it`
+The proxy only ever uses the model you asked for. If it fails, you get the error instead of a reply from a different model. The only retry is on that same model: up to 2 more tries when NVIDIA is rate-limiting (429) or overloaded (529).
 
-All fallbacks are non-Chinese-hosted to avoid filter interruption mid-scene. These can be changed, but i found that these four work best as fallbacks.
+A model name that isn't in the table above is rejected with an "Unknown model" error that lists the valid names.
 
 ### Auth Guide
 I added auth middleware that wasn't present in the code I built upon. It uses an env var in your deployment. Use any secure string of 32+ characters, or generate one by hashing your NVAPI key. I recommend using an online hash tool or command to make a hash of your NVAPI key since the key is already complex as is, and a hash makes it more secure as it cannot be realistically reversed back to the NVAPI key. The first 32 characters of the hash are enough.
@@ -111,7 +87,7 @@ After deploying, you can set these in Railway's **Variables** tab:
 | `ENABLE_THINKING_MODE` | `true` | Sends thinking parameters to supported models |
 | `DISCORD_WEBHOOK_URL` | Webhook URL | Alerts you when models fail validation |
 | `SKIP_VALIDATION` | `true` | Disables startup model checks |
-| `GLM_REASONING_EFFORT` | `low` / `high` / `max` | How long `glm-5.3` thinks before replying (default `low`) |
+| `GLM_REASONING_EFFORT` | `low` / `high` / `max` | How long `glm-5.2` (GLM-5.3) thinks before replying (default `low`) |
 
 
 Set to `false` or remove to disable. Changes apply without redeploying.
@@ -120,9 +96,10 @@ Set to `false` or remove to disable. Changes apply without redeploying.
 
 | Problem | Likely Cause | Fix |
 |---|---|---|
-| "All models failed" error | NIM API key invalid or expired | Regenerate key at build.nvidia.com |
-| Very slow responses | Using `mistral` (675B) or Chinese models during peak hours | Switch to `gemini-pro`, `mistral-turbo`, or `gpt-3.5o` |
-| Filter interrupts RP | Using Chinese-hosted model for mature content | Use `mistral`, `gemini-pro`, or `claude-3-opus` |
+| "Request failed with status code 401" error | NIM API key invalid or expired | Regenerate key at build.nvidia.com |
+| "Unknown model" error | Model name in your client isn't in the Model Mapping table | Use one of the aliases from the table, e.g. `glm-5.2` |
+| Very slow responses | Using `glm-5.2` (it thinks first) or Chinese models during peak hours | Switch to `gemini-pro` or `gpt-3.5o` |
+| Filter interrupts RP | Using Chinese-hosted model for mature content | Use `gpt-4`, `gemini-pro`, or `gpt-3.5-turbo` |
 | 404 on `/v1/chat/completions` | Auth mismatch | Verify `CLIENT_AUTH_KEY` matches between Railway and client |
 | "Failed to fetch (unk)" / "A network error occurred" | JanitorAI cached old proxy config after changing URL or model | **Reload the page** — changes don't apply until refresh |
 
@@ -149,7 +126,7 @@ Before opening an issue, check if it's already covered in the [Troubleshooting](
 When reporting bugs, include:
 - Which model alias you were using
 - Whether streaming was enabled
-- The error message (or "All models failed" if that's what you got)
+- The error message
 - Your deployment platform (Railway, Render, etc.)
 
 ## Contact
