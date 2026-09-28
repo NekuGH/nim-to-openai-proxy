@@ -45,6 +45,7 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 | `claude-3-opus` | `openai/gpt-oss-120b` | Alternative to Chinese models | Medium | Low-Medium |
 | `claude-3-sonnet` | `openai/gpt-oss-20b` | Fast, distinct voice | Fast | Low-Medium |
 | `glm-5.2` | `z-ai/glm-5.2` | General purpose | Medium | Medium |
+| `glm-5.3` | `z-ai/glm-5.3` | Smartest GLM, always thinks first (see below) | Medium-Slow | Medium |
 | `gpt-3.5-turbo` | `nvidia/nemotron-3-super-120b-a12b` | Lightweight tasks | Fast | Low |
 | `gpt-3.5` | `qwen/qwen3.5-397b-a17b` | Qwen fallback | Medium | Medium |
 | `google-light` | `google/gemma-4-31b-it` | Short scenes, fast | Fast | Low-Medium |
@@ -54,6 +55,14 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 | `m3` | `minimaxai/minimax-m3` | Experimental | fast | Unknown (to me) |
 | `step-3.5-flash` | `stepfun-ai/step-3.5-flash` | Chinese creative model | Fast | Medium |
 | `step-3.7-flash` | `stepfun-ai/step-3.7-flash` | Chinese creative model | Fast | Medium |
+
+### GLM-5.3 notes
+
+`glm-5.3` always thinks before it replies — the model has no way to switch this off. The proxy handles it for you:
+
+- The thinking is hidden from your chat (unless `SHOW_REASONING=true`), so you only see the reply. Expect a short pause before text starts appearing.
+- Thinking length is set by `GLM_REASONING_EFFORT`. `low` (default) is fastest and fine for RP; `high` and `max` think longer and are slower.
+- Thinking uses up tokens, so the proxy adds extra room on top of your max tokens setting (4096 for `low`, 8192 for `high`, 16384 for `max`) to avoid empty or cut-off replies.
 
 ### Filter Guide
 
@@ -102,6 +111,7 @@ After deploying, you can set these in Railway's **Variables** tab:
 | `ENABLE_THINKING_MODE` | `true` | Sends thinking parameters to supported models |
 | `DISCORD_WEBHOOK_URL` | Webhook URL | Alerts you when models fail validation |
 | `SKIP_VALIDATION` | `true` | Disables startup model checks |
+| `GLM_REASONING_EFFORT` | `low` / `high` / `max` | How long `glm-5.3` thinks before replying (default `low`) |
 
 
 Set to `false` or remove to disable. Changes apply without redeploying.

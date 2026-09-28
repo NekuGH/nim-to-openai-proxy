@@ -21,6 +21,9 @@ const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
 const ENABLE_THINKING_MODE = process.env.ENABLE_THINKING_MODE === 'true';
 const SKIP_VALIDATION = process.env.SKIP_VALIDATION === 'true';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+const GLM_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.GLM_REASONING_EFFORT)
+  ? process.env.GLM_REASONING_EFFORT
+  : 'low';
 
 const MAX_TOKENS_LIMIT = 65536;
 const REQUEST_TIMEOUT_MS = 180000;
@@ -29,6 +32,7 @@ const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
 
 if (SHOW_REASONING) console.log('[CONFIG] Reasoning display: ENABLED');
 if (ENABLE_THINKING_MODE) console.log('[CONFIG] Thinking mode: ENABLED');
+console.log(`[CONFIG] GLM-5.3 reasoning effort: ${GLM_REASONING_EFFORT}`);
 
 // ─── Config validation ──────────────────────────────────────────────────────
 
@@ -60,6 +64,7 @@ const MODEL_MAPPING = {
   'gpt-3.5o': 'nvidia/nemotron-mini-4b-instruct',
   'gpt-4-flash': 'deepseek-ai/deepseek-v4-flash',
   'glm-5.2': 'z-ai/glm-5.2',
+  'glm-5.3': 'z-ai/glm-5.3',
   'mistral': 'mistralai/mistral-large-3-675b-instruct-2512',
   'mistral-turbo': 'mistralai/mistral-medium-3.5-128b',
   'mistral-pro': 'mistralai/mistral-small-4-119b-2603',
@@ -72,6 +77,23 @@ const MODEL_MAPPING = {
   'm3': 'minimaxai/minimax-m3',
   'step-3.5-flash': 'stepfun-ai/step-3.5-flash',
   'step-3.7-flash': 'stepfun-ai/step-3.7-flash'
+};
+
+// ─── Per-model request options ─────────────────────────────────────────────
+
+// GLM-5.3 always thinks before answering; its chat template has no off switch.
+// Never send enable_thinking: false to it — the template ignores it and the
+// reasoning then leaks into the reply. reasoning_effort (low/high/max, default
+// max) controls how long it thinks; clear_thinking is Z.ai's advice for chat.
+// Thinking counts against max_tokens, so extra room is added for it.
+const MODEL_OPTIONS = {
+  'z-ai/glm-5.3': {
+    chat_template_kwargs: {
+      reasoning_effort: GLM_REASONING_EFFORT,
+      clear_thinking: true
+    },
+    reasoningTokens: { low: 4096, high: 8192, max: 16384 }[GLM_REASONING_EFFORT]
+  }
 };
 
 const FALLBACK_MODELS = [
@@ -302,12 +324,14 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     const primaryModel = MODEL_MAPPING[model] || 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
     const modelChain = [primaryModel];
+    const modelOptions = MODEL_OPTIONS[primaryModel] || {};
 
     const baseRequest = {
       messages,
       temperature: temperature ?? 0.7,
-      max_tokens: Math.min(max_tokens ?? 2048, MAX_TOKENS_LIMIT),
+      max_tokens: Math.min((max_tokens ?? 2048) + (modelOptions.reasoningTokens || 0), MAX_TOKENS_LIMIT),
       stream: stream || false,
+      chat_template_kwargs: modelOptions.chat_template_kwargs,
       extra_body: ENABLE_THINKING_MODE
         ? { chat_template_kwargs: { thinking: true } }
         : undefined
@@ -355,7 +379,8 @@ app.post('/v1/chat/completions', async (req, res) => {
 
           if (delta) {
             let content = delta.content || '';
-            const reasoning = delta.reasoning_content;
+            // Some NIM backends name the field "reasoning" instead of "reasoning_content"
+            const reasoning = delta.reasoning_content ?? delta.reasoning;
 
             if (SHOW_REASONING) {
               if (reasoning && !reasoningOpen) {
@@ -366,13 +391,15 @@ app.post('/v1/chat/completions', async (req, res) => {
               }
 
               if (delta.content && reasoningOpen) {
-                content += `\n</thinking>\n\n${delta.content}`;
+                // Without reasoning in this chunk, content already holds delta.content
+                content = `${reasoning ? content : ''}\n</thinking>\n\n${delta.content}`;
                 reasoningOpen = false;
               }
             }
 
             delta.content = content;
             delete delta.reasoning_content;
+            delete delta.reasoning;
           }
 
           safeWrite(res, `data: ${JSON.stringify(data)}\n\n`);
@@ -476,9 +503,10 @@ app.post('/v1/chat/completions', async (req, res) => {
         model: model,
         choices: (response.data.choices || []).map((choice, i) => {
           let content = choice.message?.content || '';
+          const reasoning = choice.message?.reasoning_content ?? choice.message?.reasoning;
 
-          if (SHOW_REASONING && choice.message?.reasoning_content) {
-            const safeReasoning = choice.message.reasoning_content.replace(/\n/g, '\\n');
+          if (SHOW_REASONING && reasoning) {
+            const safeReasoning = reasoning.replace(/\n/g, '\\n');
             content = `<thinking>\n${safeReasoning}\n</thinking>\n\n${content}`;
           }
 
