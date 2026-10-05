@@ -24,6 +24,9 @@ const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const GLM_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.GLM_REASONING_EFFORT)
   ? process.env.GLM_REASONING_EFFORT
   : 'low';
+const DEEPSEEK_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.DEEPSEEK_REASONING_EFFORT)
+  ? process.env.DEEPSEEK_REASONING_EFFORT
+  : 'high';
 
 const MAX_TOKENS_LIMIT = 65536;
 const REQUEST_TIMEOUT_MS = 180000;
@@ -32,7 +35,10 @@ const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
 
 if (SHOW_REASONING) console.log('[CONFIG] Reasoning display: ENABLED');
 if (ENABLE_THINKING_MODE) console.log('[CONFIG] Thinking mode: ENABLED');
-console.log(`[CONFIG] GLM-5.3 reasoning effort: ${GLM_REASONING_EFFORT}`);
+console.log(`[CONFIG] GLM-5.3 / GLM-5.3-Flash reasoning effort: ${GLM_REASONING_EFFORT}`);
+console.log(ENABLE_THINKING_MODE
+  ? `[CONFIG] DeepSeek-V4.1-Flash thinking: ON (effort ${DEEPSEEK_REASONING_EFFORT})`
+  : '[CONFIG] DeepSeek-V4.1-Flash thinking: OFF');
 
 // ─── Config validation ──────────────────────────────────────────────────────
 
@@ -57,24 +63,56 @@ const MODEL_MAPPING = {
   'gemini-pro': 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
   'gpt-3.5o': 'nvidia/nemotron-mini-4b-instruct',
   'gpt-4-flash': 'deepseek-ai/deepseek-v4-flash',
-  'glm-5.2': 'z-ai/glm-5.3'
+  'deepseek-v4.1-flash': 'deepseek-ai/deepseek-v4.1-flash',
+  'glm-5.2': 'z-ai/glm-5.3',
+  'glm-5.3-flash': 'z-ai/glm-5.3-flash'
 };
 
 // ─── Per-model request options ─────────────────────────────────────────────
 
-// GLM-5.3 always thinks before answering; its chat template has no off switch.
-// Never send enable_thinking: false to it — the template ignores it and the
-// reasoning then leaks into the reply. reasoning_effort (low/high/max, default
-// max) controls how long it thinks; clear_thinking is Z.ai's advice for chat.
 // Thinking counts against max_tokens, so extra room is added for it.
-const MODEL_OPTIONS = {
-  'z-ai/glm-5.3': {
+const REASONING_TOKENS = { low: 4096, high: 8192, max: 16384 };
+
+// GLM-5.3 and GLM-5.3-Flash share a chat template that always thinks before
+// answering; it has no off switch. Never send enable_thinking: false to them —
+// the template ignores it and the reasoning then leaks into the reply.
+// reasoning_effort (low/high/max, default max) controls how long they think;
+// clear_thinking is Z.ai's advice for chat.
+const GLM_OPTIONS = {
+  chat_template_kwargs: {
+    reasoning_effort: GLM_REASONING_EFFORT,
+    clear_thinking: true
+  },
+  reasoningTokens: REASONING_TOKENS[GLM_REASONING_EFFORT]
+};
+
+// DeepSeek-V4.1-Flash thinks unless told not to, and NIM DeepSeek V4 requests
+// can hang with no reply at all when chat_template_kwargs is missing, so the
+// switch is always sent explicitly. Serving stacks disagree on its name
+// (SGLang reads "thinking", the model's own template reads "enable_thinking"),
+// so both are set. reasoning_effort is only sent while thinking, and only as
+// low/high/max — every stack accepts those, while "medium" and "xhigh" each
+// break on one of them.
+const DEEPSEEK_V41_OPTIONS = ENABLE_THINKING_MODE
+  ? {
     chat_template_kwargs: {
-      reasoning_effort: GLM_REASONING_EFFORT,
-      clear_thinking: true
+      thinking: true,
+      enable_thinking: true,
+      reasoning_effort: DEEPSEEK_REASONING_EFFORT
     },
-    reasoningTokens: { low: 4096, high: 8192, max: 16384 }[GLM_REASONING_EFFORT]
+    reasoningTokens: REASONING_TOKENS[DEEPSEEK_REASONING_EFFORT]
   }
+  : {
+    chat_template_kwargs: {
+      thinking: false,
+      enable_thinking: false
+    }
+  };
+
+const MODEL_OPTIONS = {
+  'z-ai/glm-5.3': GLM_OPTIONS,
+  'z-ai/glm-5.3-flash': GLM_OPTIONS,
+  'deepseek-ai/deepseek-v4.1-flash': DEEPSEEK_V41_OPTIONS
 };
 
 // ─── Middleware ─────────────────────────────────────────────────────────────
@@ -309,7 +347,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       max_tokens: Math.min((max_tokens ?? 2048) + (modelOptions.reasoningTokens || 0), MAX_TOKENS_LIMIT),
       stream: stream || false,
       chat_template_kwargs: modelOptions.chat_template_kwargs,
-      extra_body: ENABLE_THINKING_MODE
+      // Models with their own chat_template_kwargs already carry the right
+      // thinking switch; don't send them a second, conflicting one
+      extra_body: ENABLE_THINKING_MODE && !modelOptions.chat_template_kwargs
         ? { chat_template_kwargs: { thinking: true } }
         : undefined
     };
