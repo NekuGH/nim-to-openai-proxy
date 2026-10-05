@@ -58,13 +58,13 @@ validateConfig();
 
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/nemotron-3-super-120b-a12b',
-  'gpt-4': 'nvidia/nemotron-3-ultra-550b-a55b',
+  'nemotron-3-ultra': 'nvidia/nemotron-3-ultra-550b-a55b',
   'gpt-4o': 'deepseek-ai/deepseek-v4-pro-0813',
   'gemini-pro': 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
   'gpt-3.5o': 'nvidia/nemotron-mini-4b-instruct',
   'gpt-4-flash': 'deepseek-ai/deepseek-v4-flash',
   'deepseek-v4.1-flash': 'deepseek-ai/deepseek-v4.1-flash',
-  'glm-5.2': 'z-ai/glm-5.3',
+  'glm-5.3': 'z-ai/glm-5.3',
   'glm-5.3-flash': 'z-ai/glm-5.3-flash'
 };
 

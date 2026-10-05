@@ -9,7 +9,7 @@
 
 const PROXY_URL = (process.env.PROXY_URL || 'http://localhost:3000').replace(/\/+$/, '');
 const CLIENT_AUTH_KEY = process.env.CLIENT_AUTH_KEY;
-const MODELS = (process.env.MODELS || 'deepseek-v4.1-flash,glm-5.2,glm-5.3-flash')
+const MODELS = (process.env.MODELS || 'deepseek-v4.1-flash,glm-5.3,glm-5.3-flash')
   .split(',')
   .map(m => m.trim())
   .filter(Boolean);

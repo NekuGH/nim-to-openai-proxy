@@ -140,7 +140,7 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
       maxTokens: 2048
     },
     {
-      alias: 'glm-5.2',
+      alias: 'glm-5.3',
       nimId: 'z-ai/glm-5.3',
       kwargs: { reasoning_effort: 'low', clear_thinking: true },
       maxTokens: 2048 + 4096
@@ -248,10 +248,22 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
     assert.equal(res.status, 400);
     const body = await res.json();
     assert.equal(body.error.code, 'model_not_found');
-    for (const alias of ['deepseek-v4.1-flash', 'glm-5.2', 'glm-5.3-flash']) {
+    for (const alias of ['deepseek-v4.1-flash', 'glm-5.3', 'glm-5.3-flash']) {
       assert.ok(body.error.message.includes(alias), `${alias} not listed`);
     }
     assert.equal(nim.requests.length, before, 'unknown alias must not reach NIM');
+  });
+
+  it('serves the renamed aliases and no longer accepts the old names', async () => {
+    for (const [alias, nimId] of [['nemotron-3-ultra', 'nvidia/nemotron-3-ultra-550b-a55b'], ['glm-5.3', 'z-ai/glm-5.3']]) {
+      const res = await chat(proxy, { model: alias, messages: MESSAGES });
+      assert.equal(res.status, 200);
+      assert.equal(nim.lastRequest().model, nimId);
+    }
+    for (const oldName of ['gpt-4', 'glm-5.2']) {
+      const res = await chat(proxy, { model: oldName, messages: MESSAGES });
+      assert.equal(res.status, 400, `${oldName} should be gone`);
+    }
   });
 
   it('rejects requests without the client key', async () => {
@@ -310,7 +322,7 @@ describe('thinking on (ENABLE_THINKING_MODE, SHOW_REASONING, custom efforts)', (
     assert.equal(streamedContent(chunks), shownReasoning('deepseek-ai/deepseek-v4.1-flash', 'max'));
   });
 
-  for (const [alias, nimId] of [['glm-5.2', 'z-ai/glm-5.3'], ['glm-5.3-flash', 'z-ai/glm-5.3-flash']]) {
+  for (const [alias, nimId] of [['glm-5.3', 'z-ai/glm-5.3'], ['glm-5.3-flash', 'z-ai/glm-5.3-flash']]) {
     it(`${alias}: uses GLM_REASONING_EFFORT and never gets a thinking switch`, async () => {
       const res = await chat(proxy, { model: alias, messages: MESSAGES });
       assert.equal(res.status, 200);

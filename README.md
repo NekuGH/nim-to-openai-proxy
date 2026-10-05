@@ -29,19 +29,19 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 
 | Alias | Backend Model | Best For | Speed | Filters |
 |---|---|---|---|---|
-| `gpt-4` | `nvidia/nemotron-3-ultra-550b-a55b` | Immersive RP | Fast | Low |
+| `nemotron-3-ultra` | `nvidia/nemotron-3-ultra-550b-a55b` | Immersive RP | Fast | Low |
 | `gpt-4o` | `deepseek-ai/deepseek-v4-pro-0813` |
 | `gpt-4-flash` | `deepseek-ai/deepseek-v4-flash` | Fast, non-edgy RP | Fast | High |
 | `deepseek-v4.1-flash` | `deepseek-ai/deepseek-v4.1-flash` | Fast replies, huge context, can read images (see below) | Fast | High |
 | `gpt-3.5o` | `nvidia/nemotron-mini-4b-instruct` | Lightweight RP, fast responses | Very Fast | Low |
 | `gemini-pro` | `nvidia/llama-3.3-nemotron-super-49b-v1.5` | Daily driver, low latency | Fast | Low |
-| `glm-5.2` | `z-ai/glm-5.3` | General purpose, always thinks first (see below) | Medium-Slow | Medium |
+| `glm-5.3` | `z-ai/glm-5.3` | General purpose, always thinks first (see below) | Medium-Slow | Medium |
 | `glm-5.3-flash` | `z-ai/glm-5.3-flash` | Lighter, faster GLM-5.3, can read images, always thinks first | Medium | Medium |
 | `gpt-3.5-turbo` | `nvidia/nemotron-3-super-120b-a12b` | Lightweight tasks | Fast | Low |
 
 ### GLM-5.3 and GLM-5.3-Flash notes
 
-The `glm-5.2` alias now runs GLM-5.3, since NVIDIA retired GLM-5.2 — keep using `glm-5.2` as the model name. `glm-5.3-flash` runs GLM-5.3-Flash, a smaller and faster version that can also read images. Both always think before they reply — the models have no way to switch this off. The proxy handles it for you:
+`glm-5.3` runs GLM-5.3 (it replaced GLM-5.2, which NVIDIA retired), and `glm-5.3-flash` runs GLM-5.3-Flash, a smaller and faster version that can also read images. Both always think before they reply — the models have no way to switch this off. The proxy handles it for you:
 
 - The thinking is hidden from your chat (unless `SHOW_REASONING=true`), so you only see the reply. Expect a short pause before text starts appearing.
 - Thinking length is set by `GLM_REASONING_EFFORT`. `low` (default) is fastest and fine for RP; `high` and `max` think longer and are slower.
@@ -59,9 +59,9 @@ The `glm-5.2` alias now runs GLM-5.3, since NVIDIA retired GLM-5.2 — keep usin
 
 | If your RP involves... | Avoid | Use instead |
 |---|---|---|
-| Dark themes, violence, mature content | `gpt-4o`, `gpt-4-flash`, `deepseek-v4.1-flash` (They have high filters due to being based in China) | `gpt-4`, `gemini-pro`, `gpt-3.5-turbo` |
-| Fast responses needed | `glm-5.2`, `glm-5.3-flash` (they think before replying) | `gemini-pro`, `gpt-3.5o`, `deepseek-v4.1-flash` |
-| Long context / memory | Anything under 30B | `gpt-4`, `glm-5.2`, `deepseek-v4.1-flash` |
+| Dark themes, violence, mature content | `gpt-4o`, `gpt-4-flash`, `deepseek-v4.1-flash` (They have high filters due to being based in China) | `nemotron-3-ultra`, `gemini-pro`, `gpt-3.5-turbo` |
+| Fast responses needed | `glm-5.3`, `glm-5.3-flash` (they think before replying) | `gemini-pro`, `gpt-3.5o`, `deepseek-v4.1-flash` |
+| Long context / memory | Anything under 30B | `nemotron-3-ultra`, `glm-5.3`, `deepseek-v4.1-flash` |
 | Sending images | Text-only models | `deepseek-v4.1-flash`, `glm-5.3-flash` |
 | Testing / very fast replies | — | `gpt-3.5o` |
 
@@ -98,7 +98,7 @@ After deploying, you can set these in Railway's **Variables** tab:
 | `ENABLE_THINKING_MODE` | `true` | Sends thinking parameters to supported models; turns thinking on for `deepseek-v4.1-flash` |
 | `DISCORD_WEBHOOK_URL` | Webhook URL | Alerts you when models fail validation |
 | `SKIP_VALIDATION` | `true` | Disables startup model checks |
-| `GLM_REASONING_EFFORT` | `low` / `high` / `max` | How long `glm-5.2` (GLM-5.3) and `glm-5.3-flash` think before replying (default `low`) |
+| `GLM_REASONING_EFFORT` | `low` / `high` / `max` | How long `glm-5.3` and `glm-5.3-flash` think before replying (default `low`) |
 | `DEEPSEEK_REASONING_EFFORT` | `low` / `high` / `max` | How long `deepseek-v4.1-flash` thinks when `ENABLE_THINKING_MODE=true` (default `high`) |
 
 
@@ -109,10 +109,10 @@ Set to `false` or remove to disable. Changes apply without redeploying.
 | Problem | Likely Cause | Fix |
 |---|---|---|
 | "Request failed with status code 401" error | NIM API key invalid or expired | Regenerate key at build.nvidia.com |
-| "Unknown model" error | Model name in your client isn't in the Model Mapping table | Use one of the aliases from the table, e.g. `glm-5.2` |
-| Very slow responses | Using `glm-5.2` / `glm-5.3-flash` (they think first) or Chinese models during peak hours | Switch to `gemini-pro` or `gpt-3.5o` |
+| "Unknown model" error | Model name in your client isn't in the Model Mapping table | Use one of the aliases from the table, e.g. `glm-5.3` |
+| Very slow responses | Using `glm-5.3` / `glm-5.3-flash` (they think first) or Chinese models during peak hours | Switch to `gemini-pro` or `gpt-3.5o` |
 | "timeout of 180000ms exceeded" | NVIDIA's free tier is overloaded for that model (common for new models like `deepseek-v4.1-flash` and `glm-5.3-flash`) | Try again later or switch models — the proxy never swaps models for you |
-| Filter interrupts RP | Using Chinese-hosted model for mature content | Use `gpt-4`, `gemini-pro`, or `gpt-3.5-turbo` |
+| Filter interrupts RP | Using Chinese-hosted model for mature content | Use `nemotron-3-ultra`, `gemini-pro`, or `gpt-3.5-turbo` |
 | 404 on `/v1/chat/completions` | Auth mismatch | Verify `CLIENT_AUTH_KEY` matches between Railway and client |
 | "Failed to fetch (unk)" / "A network error occurred" | JanitorAI cached old proxy config after changing URL or model | **Reload the page** — changes don't apply until refresh |
 
@@ -121,13 +121,13 @@ Set to `false` or remove to disable. Changes apply without redeploying.
 
 `npm test` runs the proxy against a fake NVIDIA API on your machine. It checks that each model gets the right settings, that replies come through cleanly (streamed or not), and that thinking never leaks into the reply. No API key or internet needed.
 
-`npm run smoke` checks a running proxy against the real NVIDIA API. It asks `deepseek-v4.1-flash`, `glm-5.2` and `glm-5.3-flash` for a one-word reply, normally and streamed:
+`npm run smoke` checks a running proxy against the real NVIDIA API. It asks `deepseek-v4.1-flash`, `glm-5.3` and `glm-5.3-flash` for a one-word reply, normally and streamed:
 
 ```
 PROXY_URL=https://your-app.up.railway.app CLIENT_AUTH_KEY=your-key npm run smoke
 ```
 
-`PROXY_URL` defaults to `http://localhost:3000`. Set `MODELS=glm-5.3-flash,gpt-4` to pick other aliases.
+`PROXY_URL` defaults to `http://localhost:3000`. Set `MODELS=glm-5.3-flash,nemotron-3-ultra` to pick other aliases.
 
 ## Contributing
 
