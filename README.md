@@ -100,6 +100,7 @@ After deploying, you can set these in Railway's **Variables** tab:
 | `SKIP_VALIDATION` | `true` | Disables startup model checks |
 | `GLM_REASONING_EFFORT` | `low` / `high` / `max` | How long `glm-5.3` and `glm-5.3-flash` think before replying (default `low`) |
 | `DEEPSEEK_REASONING_EFFORT` | `low` / `high` / `max` | How long `deepseek-v4.1-flash` thinks when `ENABLE_THINKING_MODE=true` (default `high`) |
+| `REQUEST_TIMEOUT_MS` | milliseconds | How long to wait for NVIDIA, for every model (default `480000` = 8 minutes): both for it to start answering and for the longest silence in the middle of a reply. A reply that keeps streaming is never cut off |
 
 
 Set to `false` or remove to disable. Changes apply without redeploying.
@@ -111,7 +112,7 @@ Set to `false` or remove to disable. Changes apply without redeploying.
 | "Request failed with status code 401" error | NIM API key invalid or expired | Regenerate key at build.nvidia.com |
 | "Unknown model" error | Model name in your client isn't in the Model Mapping table | Use one of the aliases from the table, e.g. `glm-5.3` |
 | Very slow responses | Using `glm-5.3` / `glm-5.3-flash` (they think first) or Chinese models during peak hours | Switch to `gemini-pro` or `gpt-3.5o` |
-| "timeout of 180000ms exceeded" | NVIDIA's free tier is overloaded for that model (common for new models like `deepseek-v4.1-flash` and `glm-5.3-flash`) | Try again later or switch models — the proxy never swaps models for you |
+| "timeout of 480000ms exceeded" | NVIDIA's free tier is overloaded for that model (common for new models like `deepseek-v4.1-flash` and `glm-5.3-flash`) | Try again later or switch models — the proxy never swaps models for you |
 | Filter interrupts RP | Using Chinese-hosted model for mature content | Use `nemotron-3-ultra`, `gemini-pro`, or `gpt-3.5-turbo` |
 | 404 on `/v1/chat/completions` | Auth mismatch | Verify `CLIENT_AUTH_KEY` matches between Railway and client |
 | "Failed to fetch (unk)" / "A network error occurred" | JanitorAI cached old proxy config after changing URL or model | **Reload the page** — changes don't apply until refresh |

@@ -29,10 +29,17 @@ const DEEPSEEK_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.DE
   : 'high';
 
 const MAX_TOKENS_LIMIT = 65536;
-const REQUEST_TIMEOUT_MS = 180000;
+// How long to wait on NIM, for every model: both for it to start answering and
+// for the longest silence mid-stream (a stream that keeps sending has no cap).
+// NVIDIA's free tier is often overloaded and can queue a request for minutes.
+const DEFAULT_REQUEST_TIMEOUT_MS = 480000;
+const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.REQUEST_TIMEOUT_MS, 10) > 0
+  ? Number.parseInt(process.env.REQUEST_TIMEOUT_MS, 10)
+  : DEFAULT_REQUEST_TIMEOUT_MS;
 const VALIDATION_TIMEOUT_MS = 15000;
 const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
 
+console.log(`[CONFIG] Upstream timeout: ${REQUEST_TIMEOUT_MS / 1000}s`);
 if (SHOW_REASONING) console.log('[CONFIG] Reasoning display: ENABLED');
 if (ENABLE_THINKING_MODE) console.log('[CONFIG] Thinking mode: ENABLED');
 console.log(`[CONFIG] GLM-5.3 / GLM-5.3-Flash reasoning effort: ${GLM_REASONING_EFFORT}`);

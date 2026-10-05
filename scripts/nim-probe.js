@@ -12,22 +12,25 @@
 //   MODES      stream,plain — streamed and/or non-streamed (default: both)
 //   RUNS       rounds over every combination (default 3)
 //   GAP_MS     pause between requests, to stay under the rate limit (default 3000)
-//   HARD_TIMEOUT_MS  give up on one request after this long (default 300000)
+//   HARD_TIMEOUT_MS  give up on one request after this long (default 600000,
+//              longer than the proxy's 480 s so slower answers still show up)
 //   BURST      fire this many short requests at once at the first profile
 //              instead, to see how rate limiting answers (default off)
 //   OUT        JSON-lines file every result is appended to
 //              (default nim-probe-results.jsonl)
 //
-// Behind an HTTP proxy, Node's fetch needs NODE_USE_ENV_PROXY=1 (Node 22.21+).
+// Uses axios (as server.js does) rather than fetch: Node's fetch gives up by
+// itself after 300 s, and axios also follows HTTPS_PROXY when one is set.
 
 const fs = require('fs');
+const axios = require('axios');
 
 const NIM_API_BASE = (process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1').replace(/\/+$/, '');
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
 const RUNS = Number(process.env.RUNS || 3);
 const GAP_MS = Number(process.env.GAP_MS || 3000);
-const HARD_TIMEOUT_MS = Number(process.env.HARD_TIMEOUT_MS || 300000);
+const HARD_TIMEOUT_MS = Number(process.env.HARD_TIMEOUT_MS || 600000);
 const BURST = Number(process.env.BURST || 0);
 const OUT = process.env.OUT || 'nim-probe-results.jsonl';
 const list = (value, fallback) => (value ? value.split(',').map(s => s.trim()).filter(Boolean) : fallback);
@@ -124,8 +127,14 @@ const INTERESTING_HEADER = /ratelimit|retry-after|request-id|nvcf/i;
 
 function pickHeaders(headers) {
   const picked = {};
-  for (const [k, v] of headers) if (INTERESTING_HEADER.test(k)) picked[k] = v;
+  for (const [k, v] of Object.entries(headers.toJSON())) if (INTERESTING_HEADER.test(k)) picked[k] = v;
   return picked;
+}
+
+async function readAll(stream) {
+  const parts = [];
+  for await (const part of stream) parts.push(part);
+  return Buffer.concat(parts).toString('utf8');
 }
 
 async function probeOnce(profileName, size, mode) {
@@ -168,6 +177,7 @@ async function probeOnce(profileName, size, mode) {
   const started = Date.now();
   const since = () => Date.now() - started;
   const controller = new AbortController();
+  let lastEventAt = null;
   const hardTimer = setTimeout(() => controller.abort(), HARD_TIMEOUT_MS);
 
   const noteDelta = (delta) => {
@@ -185,29 +195,28 @@ async function probeOnce(profileName, size, mode) {
   };
 
   try {
-    const res = await fetch(`${NIM_API_BASE}/chat/completions`, {
-      method: 'POST',
+    const res = await axios.post(`${NIM_API_BASE}/chat/completions`, body, {
       headers: {
         Authorization: `Bearer ${NIM_API_KEY}`,
-        'Content-Type': 'application/json',
         Accept: stream ? 'text/event-stream' : 'application/json'
       },
-      body: JSON.stringify(body),
+      responseType: 'stream',
+      validateStatus: () => true,
       signal: controller.signal
     });
     result.tHeaders = since();
     result.status = res.status;
     result.headers = pickHeaders(res.headers);
 
-    if (!res.ok) {
-      const text = await res.text();
+    if (res.status < 200 || res.status >= 300) {
+      const text = await readAll(res.data);
       result.tEnd = since();
       result.error = `http_${res.status}: ${text.replace(/\s+/g, ' ').slice(0, 300)}`;
       return result;
     }
 
     if (!stream) {
-      const data = await res.json();
+      const data = JSON.parse(await readAll(res.data));
       result.tEnd = since();
       const choice = data.choices?.[0];
       noteDelta(choice?.message);
@@ -218,14 +227,14 @@ async function probeOnce(profileName, size, mode) {
       return result;
     }
 
-    const decoder = new TextDecoder();
+    res.data.setEncoding('utf8');
     let buffer = '';
-    let lastEventAt = result.tHeaders;
+    lastEventAt = result.tHeaders;
     let sawDone = false;
     result.maxGap = 0;
 
-    for await (const bytes of res.body) {
-      buffer += decoder.decode(bytes, { stream: true });
+    for await (const text of res.data) {
+      buffer += text;
       const lines = buffer.split('\n');
       buffer = lines.pop();
 
@@ -266,8 +275,10 @@ async function probeOnce(profileName, size, mode) {
     result.tEnd = since();
     if (controller.signal.aborted) {
       result.error = result.tHeaders === null ? 'hard_timeout_before_headers' : 'hard_timeout_mid_body';
+      // The silence that made us give up counts as a gap too
+      if (lastEventAt !== null) result.maxGap = Math.max(result.maxGap ?? 0, result.tEnd - lastEventAt);
     } else {
-      result.error = `network: ${err.cause?.code || err.cause?.message || err.message}`;
+      result.error = `network: ${err.code || err.message}`;
     }
     return result;
   } finally {

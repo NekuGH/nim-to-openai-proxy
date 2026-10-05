@@ -13,6 +13,10 @@
 //
 // GLM-5.3-Flash streams its thinking as "reasoning", the others as
 // "reasoning_content", so both field names the proxy handles get exercised.
+//
+// startMockNim({ headerDelayMs, midStreamSilenceMs }) imitates an overloaded
+// NIM: a long wait before it answers at all, or a stream that goes quiet
+// after its first bytes.
 
 const http = require('http');
 
@@ -137,9 +141,11 @@ function chunk(model, delta, finishReason = null) {
   };
 }
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 // Writes SSE frames over several TCP writes, deliberately splitting a frame
 // mid-line and a multi-byte character mid-sequence.
-async function streamCompletion(res, body, p) {
+async function streamCompletion(res, body, p, silenceMs) {
   const answer = answerFor(body.model);
   const frames = [chunk(body.model, { role: 'assistant', content: '' })];
 
@@ -172,14 +178,16 @@ async function streamCompletion(res, body, p) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
   let start = 0;
   for (const cut of [...cuts, wire.length]) {
+    if (res.destroyed) return;
     res.write(wire.subarray(start, cut));
+    if (start === 0 && silenceMs) await sleep(silenceMs);
     start = cut;
     await new Promise(r => setImmediate(r));
   }
   res.end();
 }
 
-function startMockNim() {
+function startMockNim({ headerDelayMs = 0, midStreamSilenceMs = 0 } = {}) {
   const requests = [];
 
   const server = http.createServer((req, res) => {
@@ -214,7 +222,10 @@ function startMockNim() {
           return sendJson(res, err.status || 500, { error: { message: err.message } });
         }
 
-        if (body.stream) return streamCompletion(res, body, p);
+        if (headerDelayMs) await sleep(headerDelayMs);
+        if (res.destroyed) return;
+
+        if (body.stream) return streamCompletion(res, body, p, midStreamSilenceMs);
         return sendJson(res, 200, completion(body, p));
       }
 

@@ -34,7 +34,7 @@ async function startProxy(nimUrl, extraEnv = {}) {
     delete env[k];
   }
   for (const k of ['SHOW_REASONING', 'ENABLE_THINKING_MODE', 'SKIP_VALIDATION', 'DISCORD_WEBHOOK_URL',
-    'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT']) {
+    'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT', 'REQUEST_TIMEOUT_MS']) {
     delete env[k];
   }
   Object.assign(env, {
@@ -158,6 +158,10 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
     assert.equal(res.status, 200);
     const ids = (await res.json()).data.map(m => m.id);
     for (const { alias } of CASES) assert.ok(ids.includes(alias), `${alias} missing from ${ids}`);
+  });
+
+  it('waits up to 480 s on NIM by default', () => {
+    assert.ok(proxy.logs().includes('[CONFIG] Upstream timeout: 480s'), proxy.logs());
   });
 
   it('finds every mapped model in the NIM catalog at startup', async () => {
@@ -378,5 +382,67 @@ describe('unsupported effort values fall back to safe defaults', () => {
     const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES });
     assert.equal(res.status, 200);
     assert.equal(nim.lastRequest().chat_template_kwargs.reasoning_effort, 'low');
+  });
+});
+
+// ─── Upstream timeout ──────────────────────────────────────────────────────
+
+// Same rules as the 480 s default, scaled down to 1 s via REQUEST_TIMEOUT_MS
+describe('upstream timeout', () => {
+  let slowNim;
+  let quietNim;
+  let slowProxy;
+  let quietProxy;
+
+  before(async () => {
+    slowNim = await startMockNim({ headerDelayMs: 3000 });
+    quietNim = await startMockNim({ midStreamSilenceMs: 3000 });
+    slowProxy = await startProxy(slowNim.url, { REQUEST_TIMEOUT_MS: '1000', SKIP_VALIDATION: 'true' });
+    quietProxy = await startProxy(quietNim.url, { REQUEST_TIMEOUT_MS: '1000', SKIP_VALIDATION: 'true' });
+  });
+
+  after(async () => {
+    await slowProxy?.stop();
+    await quietProxy?.stop();
+    await slowNim?.close();
+    await quietNim?.close();
+  });
+
+  it('logs the configured timeout', () => {
+    assert.ok(slowProxy.logs().includes('[CONFIG] Upstream timeout: 1s'), slowProxy.logs());
+  });
+
+  for (const stream of [false, true]) {
+    it(`gives up when NIM does not start answering in time (${stream ? 'streaming' : 'plain'})`, async () => {
+      const started = Date.now();
+      const res = await chat(slowProxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream });
+      const elapsed = Date.now() - started;
+
+      assert.equal(res.status, 500);
+      assert.equal((await res.json()).error.message, 'timeout of 1000ms exceeded');
+      assert.ok(elapsed >= 900 && elapsed < 2500, `took ${elapsed} ms`);
+    });
+  }
+
+  it('ends a stream that goes silent mid-reply with an error chunk and [DONE]', async () => {
+    const started = Date.now();
+    const res = await chat(quietProxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES, stream: true });
+    assert.equal(res.status, 200);
+    const chunks = parseSse(await res.text());
+    const elapsed = Date.now() - started;
+
+    assert.equal(chunks.at(-1).error?.type, 'stream_error');
+    assert.ok(elapsed >= 900 && elapsed < 2500, `took ${elapsed} ms`);
+  });
+
+  it('falls back to 480 s when REQUEST_TIMEOUT_MS is not a positive number', async () => {
+    for (const bad of ['abc', '0', '-5']) {
+      const proxy = await startProxy(slowNim.url, { REQUEST_TIMEOUT_MS: bad, SKIP_VALIDATION: 'true' });
+      try {
+        assert.ok(proxy.logs().includes('[CONFIG] Upstream timeout: 480s'), `${bad}: ${proxy.logs()}`);
+      } finally {
+        await proxy.stop();
+      }
+    }
   });
 });
