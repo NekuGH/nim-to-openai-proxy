@@ -49,15 +49,19 @@ function envMs(name, fallback, { allowZero = false } = {}) {
 const REQUEST_TIMEOUT_MS = envMs('REQUEST_TIMEOUT_MS', 480000);
 const VALIDATION_TIMEOUT_MS = 15000;
 const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
-// A streaming client hears nothing while NVIDIA queues a request, and may give
-// up. After this much silence it gets an SSE comment line, which clients
-// ignore (OpenRouter does the same). 0 turns it off.
-const STREAM_KEEPALIVE_MS = envMs('STREAM_KEEPALIVE_MS', 15000, { allowZero: true });
+// While NVIDIA queues a request the client hears nothing, and whatever sits in
+// between gives up: Render's Cloudflare edge drops a request that hasn't
+// started answering within ~100 s, and the browser then only reports a vague
+// "NetworkError". So after this much silence the reply is started early and
+// kept alive with filler clients ignore: an SSE comment line when streaming
+// (OpenRouter does the same), a newline before the JSON otherwise (JSON
+// allows leading whitespace). 0 turns it off.
+const KEEPALIVE_MS = envMs('KEEPALIVE_MS', 15000, { allowZero: true });
 
 console.log(`[CONFIG] Upstream timeout: ${REQUEST_TIMEOUT_MS / 1000}s`);
-console.log(STREAM_KEEPALIVE_MS > 0
-  ? `[CONFIG] Stream keep-alive: every ${STREAM_KEEPALIVE_MS / 1000}s of silence`
-  : '[CONFIG] Stream keep-alive: OFF');
+console.log(KEEPALIVE_MS > 0
+  ? `[CONFIG] Keep-alive: every ${KEEPALIVE_MS / 1000}s of silence`
+  : '[CONFIG] Keep-alive: OFF');
 if (SHOW_REASONING) console.log('[CONFIG] Reasoning display: ENABLED');
 if (ENABLE_THINKING_MODE) console.log('[CONFIG] Thinking mode: ENABLED');
 console.log(`[CONFIG] GLM-5.3 / GLM-5.3-Flash reasoning effort: ${GLM_REASONING_EFFORT}`);
@@ -454,6 +458,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   let upstreamStream = null;
   let keepAliveTimer = null;
   let lastWriteAt = Date.now();
+  let isStream = false;
 
   // 'close' on the response before it finished means the client hung up.
   // (req's own 'close' fires as soon as the body is read, so it can't tell.)
@@ -470,6 +475,18 @@ app.post('/v1/chat/completions', async (req, res) => {
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
   };
+  const startJson = () => {
+    if (res.headersSent) return;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.flushHeaders();
+  };
+  // A plain JSON reply, whether or not keep-alive already sent the headers
+  const finishJson = (status, payload) => {
+    clearInterval(keepAliveTimer);
+    if (!res.headersSent) return res.status(status).json(payload);
+    if (!res.writableEnded) res.end(JSON.stringify(payload));
+  };
   const writeToClient = data => {
     lastWriteAt = Date.now();
     return safeWrite(res, data);
@@ -483,6 +500,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       max_tokens,
       stream
     } = req.body || {};
+    isStream = Boolean(stream);
 
     // No default model: an unknown alias is an error, never a silent swap
     const nimModel = MODEL_MAPPING[model];
@@ -517,12 +535,17 @@ app.post('/v1/chat/completions', async (req, res) => {
       chat_template_kwargs: modelOptions.chat_template_kwargs
     };
 
-    if (stream && STREAM_KEEPALIVE_MS > 0) {
+    if (KEEPALIVE_MS > 0) {
       keepAliveTimer = setInterval(() => {
-        if (Date.now() - lastWriteAt < STREAM_KEEPALIVE_MS) return;
-        startSse();
-        writeToClient(': keep-alive\n\n');
-      }, Math.max(50, Math.floor(STREAM_KEEPALIVE_MS / 2)));
+        if (Date.now() - lastWriteAt < KEEPALIVE_MS) return;
+        if (isStream) {
+          startSse();
+          writeToClient(': keep-alive\n\n');
+        } else {
+          startJson();
+          writeToClient('\n');
+        }
+      }, Math.max(50, Math.floor(KEEPALIVE_MS / 2)));
     }
 
     const response = await callModel(baseRequest, nimModel, clientGone.signal);
@@ -717,7 +740,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
       };
 
-      res.json(openaiResponse);
+      finishJson(200, openaiResponse);
     }
 
   } catch (error) {
@@ -731,23 +754,18 @@ app.post('/v1/chat/completions', async (req, res) => {
     const failure = upstreamFailure(error);
     console.error(`[PROXY] Request failed (${failure.status}): ${failure.message}`);
 
-    if (!res.headersSent) {
-      res.status(failure.status).json({
-        error: {
-          message: failure.message,
-          type: 'upstream_error',
-          code: failure.status
-        }
-      });
+    const errorBody = {
+      error: {
+        message: failure.message,
+        type: 'upstream_error',
+        code: failure.status
+      }
+    };
+    if (!isStream || !res.headersSent) {
+      // Once keep-alive has sent a 200, the error can only go in the body
+      finishJson(failure.status, errorBody);
     } else if (!res.writableEnded) {
-      // Keep-alive already sent a 200, so the error goes in the stream
-      safeWrite(res, `data: ${JSON.stringify({
-        error: {
-          message: failure.message,
-          type: 'upstream_error',
-          code: failure.status
-        }
-      })}\n\n`);
+      safeWrite(res, `data: ${JSON.stringify(errorBody)}\n\n`);
       safeWrite(res, 'data: [DONE]\n\n');
       res.end();
     }
