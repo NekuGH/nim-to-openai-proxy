@@ -1,0 +1,58 @@
+{
+  "name": "Example world",
+  "characters": [],
+  "entries": [
+    {
+      "name": "World rule (always on)",
+      "constant": true,
+      "keys": [],
+      "content": "Magic in this world is rare, costly and feared. Anyone caught casting in public is reported to the Tidewardens.",
+      "insertion_order": 10,
+      "position": "before_char"
+    },
+    {
+      "name": "Vel Arun",
+      "keys": [
+        "Vel Arun",
+        "harbor",
+        "docks"
+      ],
+      "content": "Vel Arun is a harbor city carved into black cliffs. Whale-oil lanterns line the switchback stairs between the docks and the upper wards. The sea there never freezes.",
+      "insertion_order": 100
+    },
+    {
+      "name": "The drowned bells (only at night)",
+      "keys": [
+        "bell",
+        "bells"
+      ],
+      "secondary_keys": [
+        "night",
+        "midnight",
+        "dark"
+      ],
+      "selective": true,
+      "content": "Every seventh night the drowned bells ring beneath the water, and no fishing boat leaves the harbor until dawn.",
+      "insertion_order": 50
+    },
+    {
+      "name": "Mira (whole word only, so 'Miranda' doesn't trigger it)",
+      "keys": [
+        "Mira"
+      ],
+      "content": "Mira is a former smuggler with a ledger of debts she never repays. She trusts no one who wears a Tideward badge.",
+      "insertion_order": 60,
+      "extensions": {
+        "match_whole_words": true
+      }
+    },
+    {
+      "name": "Tidewardens (regex key)",
+      "keys": [
+        "/\\btidewarden(s)?\\b/i"
+      ],
+      "content": "The Tidewardens keep the old breakwater and answer to no guild, only to the drowned bells.",
+      "insertion_order": 70
+    }
+  ]
+}

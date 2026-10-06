@@ -13,18 +13,23 @@
 //
 // GLM-5.3-Flash streams its thinking as "reasoning", the others as
 // "reasoning_content", so both field names the proxy handles get exercised.
+//
+// startMockNim({ headerDelayMs, midStreamSilenceMs }) imitates an overloaded
+// NIM: a long wait before it answers at all, or a stream that goes quiet
+// after its first bytes. `failures` is a list of { status, body } answered,
+// in order, to the first chat requests instead of a reply ({ cutOff: true }
+// instead sends 200 and half a body, then drops the connection); `answer` replaces
+// the reply text and `chunkSize` sets how many characters each streamed piece
+// of it carries.
 
 const http = require('http');
 
 const NIM_KEY = 'test-nim-key';
 
 const CATALOG = [
-  'nvidia/nemotron-3-super-120b-a12b',
   'nvidia/nemotron-3-ultra-550b-a55b',
-  'deepseek-ai/deepseek-v4-pro-0813',
-  'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-  'nvidia/nemotron-mini-4b-instruct',
-  'deepseek-ai/deepseek-v4-flash',
+  'nvidia/nemotron-3-super-120b-a12b',
+  'nvidia/nemotron-3.5-lightning-30b-a3b',
   'deepseek-ai/deepseek-v4.1-flash',
   'z-ai/glm-5.3',
   'z-ai/glm-5.3-flash'
@@ -36,8 +41,8 @@ const SAFE_DEEPSEEK_EFFORTS = ['low', 'high', 'max'];
 
 // Polish diacritics are multi-byte in UTF-8; the stream writer splits one of
 // them across two writes to check the proxy reassembles it correctly.
-function answerFor(model) {
-  return `Cześć! Zażółć gęślą jaźń — reply from ${model}.`;
+function answerFor(model, override) {
+  return override ?? `Cześć! Zażółć gęślą jaźń — reply from ${model}.`;
 }
 
 function reasoningFor(model, effort) {
@@ -106,8 +111,8 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
-function completion(body, p) {
-  const answer = answerFor(body.model);
+function completion(body, p, answerOverride) {
+  const answer = answerFor(body.model, answerOverride);
   const reasoning = p.thinking ? reasoningFor(body.model, p.effort) : null;
   const message = { role: 'assistant', content: answer };
 
@@ -137,10 +142,12 @@ function chunk(model, delta, finishReason = null) {
   };
 }
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 // Writes SSE frames over several TCP writes, deliberately splitting a frame
 // mid-line and a multi-byte character mid-sequence.
-async function streamCompletion(res, body, p) {
-  const answer = answerFor(body.model);
+async function streamCompletion(res, body, p, { silenceMs, answerOverride, chunkSize = 5 }) {
+  const answer = answerFor(body.model, answerOverride);
   const frames = [chunk(body.model, { role: 'assistant', content: '' })];
 
   if (p.thinking) {
@@ -153,7 +160,7 @@ async function streamCompletion(res, body, p) {
     if (p.leakReasoning) frames.push(chunk(body.model, { content: '</think>' }));
   }
 
-  for (const piece of answer.match(/[\s\S]{1,5}/g)) {
+  for (const piece of answer.match(new RegExp(`[\\s\\S]{1,${chunkSize}}`, 'g'))) {
     frames.push(chunk(body.model, { content: piece }));
   }
   frames.push(chunk(body.model, {}, 'stop'));
@@ -172,15 +179,19 @@ async function streamCompletion(res, body, p) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
   let start = 0;
   for (const cut of [...cuts, wire.length]) {
+    if (res.destroyed) return;
     res.write(wire.subarray(start, cut));
+    if (start === 0 && silenceMs) await sleep(silenceMs);
     start = cut;
     await new Promise(r => setImmediate(r));
   }
   res.end();
 }
 
-function startMockNim() {
+function startMockNim({ headerDelayMs = 0, midStreamSilenceMs = 0, failures = [], answer, chunkSize } = {}) {
   const requests = [];
+  const pendingFailures = [...failures];
+  let disconnects = 0;
 
   const server = http.createServer((req, res) => {
     let raw = '';
@@ -214,8 +225,20 @@ function startMockNim() {
           return sendJson(res, err.status || 500, { error: { message: err.message } });
         }
 
-        if (body.stream) return streamCompletion(res, body, p);
-        return sendJson(res, 200, completion(body, p));
+        res.on('close', () => { if (!res.writableFinished) disconnects++; });
+        if (headerDelayMs) await sleep(headerDelayMs);
+        if (res.destroyed) return;
+
+        const failure = pendingFailures.shift();
+        if (failure?.cutOff) {
+          res.writeHead(200, { 'Content-Type': body.stream ? 'text/event-stream' : 'application/json' });
+          res.write(body.stream ? 'data: {"choices":[{"delta":{"content":"Hal' : '{"id":"x","choices":[{"message":{"content":"Hal');
+          return setTimeout(() => res.destroy(), 50);
+        }
+        if (failure) return sendJson(res, failure.status, failure.body ?? { error: { message: `mock failure ${failure.status}` } });
+
+        if (body.stream) return streamCompletion(res, body, p, { silenceMs: midStreamSilenceMs, answerOverride: answer, chunkSize });
+        return sendJson(res, 200, completion(body, p, answer));
       }
 
       sendJson(res, 404, { error: { message: `No route ${req.method} ${req.url}` } });
@@ -228,6 +251,7 @@ function startMockNim() {
         url: `http://127.0.0.1:${server.address().port}/v1`,
         requests,
         lastRequest: () => requests[requests.length - 1],
+        disconnects: () => disconnects,
         close: () => new Promise(r => server.close(r))
       });
     });
