@@ -1,7 +1,7 @@
 // scripts/nim-probe.js — Measures how NVIDIA NIM really behaves for the
-// proxy's thinking-tuned models, so timeouts and retries can be set from data
-// instead of guesses. Talks to NIM directly (not through the proxy) and sends
-// the same per-model options server.js does.
+// proxy's models, so timeouts and retries can be set from data instead of
+// guesses. Talks to NIM directly (not through the proxy) and sends the same
+// per-model options server.js does.
 //
 // Usage:
 //   NIM_API_KEY=nvapi-... npm run probe
@@ -61,7 +61,11 @@ const PROFILES = {
   'glm53-low': { model: 'z-ai/glm-5.3', kwargs: glm('low'), maxTokens: REPLY_TOKENS + HEADROOM.low },
   'glm53-high': { model: 'z-ai/glm-5.3', kwargs: glm('high'), maxTokens: REPLY_TOKENS + HEADROOM.high },
   'glm53f-low': { model: 'z-ai/glm-5.3-flash', kwargs: glm('low'), maxTokens: REPLY_TOKENS + HEADROOM.low },
-  'glm53f-high': { model: 'z-ai/glm-5.3-flash', kwargs: glm('high'), maxTokens: REPLY_TOKENS + HEADROOM.high }
+  'glm53f-high': { model: 'z-ai/glm-5.3-flash', kwargs: glm('high'), maxTokens: REPLY_TOKENS + HEADROOM.high },
+  // Nemotron gets no per-model options from the proxy: the model's defaults
+  'nemo-ultra': { model: 'nvidia/nemotron-3-ultra-550b-a55b', kwargs: undefined, maxTokens: REPLY_TOKENS },
+  'nemo-super': { model: 'nvidia/nemotron-3-super-120b-a12b', kwargs: undefined, maxTokens: REPLY_TOKENS },
+  'nemo-light': { model: 'nvidia/nemotron-3.5-lightning-30b-a3b', kwargs: undefined, maxTokens: REPLY_TOKENS }
 };
 
 const profileNames = list(process.env.PROFILES, Object.keys(PROFILES));

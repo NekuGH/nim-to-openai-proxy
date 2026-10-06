@@ -4,14 +4,15 @@
 //   PROXY_URL=https://your-app.up.railway.app CLIENT_AUTH_KEY=your-key npm run smoke
 //
 // PROXY_URL defaults to http://localhost:3000. MODELS picks which aliases to
-// try (comma-separated); by default it tries the three models below. Each one
-// is asked for a one-word reply, once normally and once streamed.
+// try (comma-separated); by default it tries every model below. Each one is
+// asked for a one-word reply, once normally and once streamed.
 
 const axios = require('axios');
 
 const PROXY_URL = (process.env.PROXY_URL || 'http://localhost:3000').replace(/\/+$/, '');
 const CLIENT_AUTH_KEY = process.env.CLIENT_AUTH_KEY;
-const MODELS = (process.env.MODELS || 'deepseek-v4.1-flash,glm-5.3,glm-5.3-flash')
+const MODELS = (process.env.MODELS ||
+  'nemotron-3-ultra,nemotron-3-super,nemotron-3.5-lightning,deepseek-v4.1-flash,glm-5.3,glm-5.3-flash')
   .split(',')
   .map(m => m.trim())
   .filter(Boolean);

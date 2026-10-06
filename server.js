@@ -7,6 +7,7 @@ const cors = require('cors');
 const axios = require('axios');
 const { StringDecoder } = require('string_decoder');
 const { timingSafeEqual } = require('crypto');
+const { loadPromptAdditions, applyPromptAdditions } = require('./prompts');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -38,8 +39,17 @@ const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.REQUEST_TIMEOUT_MS, 10) >
   : DEFAULT_REQUEST_TIMEOUT_MS;
 const VALIDATION_TIMEOUT_MS = 15000;
 const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
+// A streaming client hears nothing while NVIDIA queues a request, and may give
+// up. After this much silence it gets an SSE comment line, which clients
+// ignore (OpenRouter does the same). 0 turns it off.
+const STREAM_KEEPALIVE_MS = Number.parseInt(process.env.STREAM_KEEPALIVE_MS, 10) >= 0
+  ? Number.parseInt(process.env.STREAM_KEEPALIVE_MS, 10)
+  : 15000;
 
 console.log(`[CONFIG] Upstream timeout: ${REQUEST_TIMEOUT_MS / 1000}s`);
+console.log(STREAM_KEEPALIVE_MS > 0
+  ? `[CONFIG] Stream keep-alive: every ${STREAM_KEEPALIVE_MS / 1000}s of silence`
+  : '[CONFIG] Stream keep-alive: OFF');
 if (SHOW_REASONING) console.log('[CONFIG] Reasoning display: ENABLED');
 if (ENABLE_THINKING_MODE) console.log('[CONFIG] Thinking mode: ENABLED');
 console.log(`[CONFIG] GLM-5.3 / GLM-5.3-Flash reasoning effort: ${GLM_REASONING_EFFORT}`);
@@ -61,18 +71,30 @@ function validateConfig() {
 
 validateConfig();
 
+// Fixed instructions and lorebooks, read once from files (see prompts.js)
+const PROMPT_ADDITIONS = loadPromptAdditions();
+
 // ─── Model Mapping ─────────────────────────────────────────────────────────
 
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo': 'nvidia/nemotron-3-super-120b-a12b',
   'nemotron-3-ultra': 'nvidia/nemotron-3-ultra-550b-a55b',
-  'gpt-4o': 'deepseek-ai/deepseek-v4-pro-0813',
-  'gemini-pro': 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-  'gpt-3.5o': 'nvidia/nemotron-mini-4b-instruct',
-  'gpt-4-flash': 'deepseek-ai/deepseek-v4-flash',
+  'nemotron-3-super': 'nvidia/nemotron-3-super-120b-a12b',
+  'nemotron-3.5-lightning': 'nvidia/nemotron-3.5-lightning-30b-a3b',
   'deepseek-v4.1-flash': 'deepseek-ai/deepseek-v4.1-flash',
   'glm-5.3': 'z-ai/glm-5.3',
   'glm-5.3-flash': 'z-ai/glm-5.3-flash'
+};
+
+// Names this proxy used to accept. A client still sending one is told what to
+// switch to instead of getting a bare "Unknown model".
+const OLD_MODEL_NAMES = {
+  'gpt-4': { now: 'nemotron-3-ultra' },
+  'gpt-3.5-turbo': { now: 'nemotron-3-super' },
+  'glm-5.2': { now: 'glm-5.3' },
+  'gpt-4o': { retired: 'deepseek-ai/deepseek-v4-pro-0813', try: 'deepseek-v4.1-flash' },
+  'gpt-4-flash': { retired: 'deepseek-ai/deepseek-v4-flash', try: 'deepseek-v4.1-flash' },
+  'gemini-pro': { retired: 'nvidia/llama-3.3-nemotron-super-49b-v1.5', try: 'nemotron-3.5-lightning' },
+  'gpt-3.5o': { retired: 'nvidia/nemotron-mini-4b-instruct', try: 'nemotron-3.5-lightning' }
 };
 
 // ─── Per-model request options ─────────────────────────────────────────────
@@ -266,14 +288,67 @@ function safeWrite(res, data) {
 
 // ─── Helper: Upstream Call ──────────────────────────────────────────────────
 
-// Calls exactly one model and never switches to a different one. The same
-// model is only retried when NIM is rate-limited (429) or overloaded (529).
-async function callModel(baseRequest, model) {
-  const RETRYABLE_STATUSES = [429, 529];
-  const MAX_RETRIES = 2;
-  const RETRY_DELAY_MS = 4000;
+const sleep = (ms, signal) => new Promise(resolve => {
+  const timer = setTimeout(resolve, ms);
+  signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+});
 
-  for (let attempt = 0; ; attempt++) {
+// On streamed requests NIM's error body arrives as a stream; read a little of
+// it so the client and the log get NVIDIA's actual message.
+async function readStreamText(stream, maxBytes = 65536, timeoutMs = 5000) {
+  return new Promise(resolve => {
+    let text = '';
+    const finish = () => {
+      clearTimeout(timer);
+      stream.removeAllListeners('data');
+      resolve(text);
+    };
+    const timer = setTimeout(() => { stream.destroy(); finish(); }, timeoutMs);
+    stream.setEncoding?.('utf8');
+    stream.on('data', part => {
+      text += part;
+      if (text.length >= maxBytes) { stream.destroy(); finish(); }
+    });
+    stream.on('end', finish);
+    stream.on('error', finish);
+  });
+}
+
+async function describeUpstreamError(err) {
+  let body = err.response?.data;
+  if (body === undefined || body === null) return err.message;
+  if (typeof body.on === 'function') {
+    body = await readStreamText(body);
+    try { body = JSON.parse(body); } catch { /* plain text */ }
+  }
+  if (typeof body === 'string') return body.trim().slice(0, 500) || err.message;
+  // NIM answers in a few shapes: OpenAI-style, NVCF problem+json, or vLLM's
+  const message = body?.error?.message || body?.detail || body?.message || body?.title;
+  return typeof message === 'string' ? message : JSON.stringify(body).slice(0, 500);
+}
+
+// NVIDIA is busy: wait a moment and ask the same model again
+const RATE_LIMIT_STATUSES = [429, 529];
+const RATE_LIMIT_RETRIES = 2;
+const RATE_LIMIT_DELAY_MS = 4000;
+// A hiccup between us and the model (bad gateway, briefly unavailable, dropped
+// connection): one more try, but only when it failed quickly — a gateway
+// timeout after minutes in NVIDIA's queue is not worth waiting through twice
+const HICCUP_STATUSES = [502, 503, 504];
+const HICCUP_CODES = ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'EAI_AGAIN'];
+const HICCUP_RETRIES = 1;
+const HICCUP_DELAY_MS = 2000;
+const FAST_FAILURE_MS = 30000;
+
+// Calls exactly one model and never switches to a different one. Stops early
+// when `signal` fires (the client hung up). Rejected errors carry
+// `nimMessage`, NVIDIA's own explanation.
+async function callModel(baseRequest, model, signal) {
+  let rateLimitRetries = 0;
+  let hiccupRetries = 0;
+
+  for (let attempt = 1; ; attempt++) {
+    const started = Date.now();
     try {
       return await axios.post(
         `${NIM_API_BASE}/chat/completions`,
@@ -284,24 +359,58 @@ async function callModel(baseRequest, model) {
             'Content-Type': 'application/json'
           },
           responseType: baseRequest.stream ? 'stream' : 'json',
-          timeout: REQUEST_TIMEOUT_MS
+          timeout: REQUEST_TIMEOUT_MS,
+          signal
         }
       );
 
     } catch (err) {
+      if (signal?.aborted) throw err;
+
       const status = err.response?.status;
+      const elapsed = Date.now() - started;
+      err.nimMessage = await describeUpstreamError(err);
       console.warn(
-        `[PROXY] Model failed: ${model} (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
-        status,
-        err.response?.data?.error?.message || err.message
+        `[PROXY] ${model} failed (attempt ${attempt}) after ${(elapsed / 1000).toFixed(1)}s:`,
+        status || err.code || '',
+        err.nimMessage
       );
 
-      if (!RETRYABLE_STATUSES.includes(status) || attempt >= MAX_RETRIES) {
-        throw err;
+      let delay = null;
+      if (RATE_LIMIT_STATUSES.includes(status) && rateLimitRetries < RATE_LIMIT_RETRIES) {
+        rateLimitRetries++;
+        delay = RATE_LIMIT_DELAY_MS;
+      } else if (
+        (HICCUP_STATUSES.includes(status) || (!err.response && HICCUP_CODES.includes(err.code))) &&
+        elapsed < FAST_FAILURE_MS &&
+        hiccupRetries < HICCUP_RETRIES
+      ) {
+        hiccupRetries++;
+        delay = HICCUP_DELAY_MS;
       }
-      await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+
+      if (delay === null) throw err;
+      await sleep(delay, signal);
+      if (signal?.aborted) throw err;
     }
   }
+}
+
+// What the client is told when the upstream call fails
+function upstreamFailure(err) {
+  if (err.code === 'ECONNABORTED' && !err.response && /timeout/i.test(err.message)) {
+    return {
+      status: 504,
+      message: `NVIDIA did not start answering within ${REQUEST_TIMEOUT_MS / 1000}s — it is probably overloaded. Try again, or pick another model.`
+    };
+  }
+  if (err.response) {
+    return {
+      status: err.response.status,
+      message: `NVIDIA NIM error ${err.response.status}: ${err.nimMessage || err.message}`
+    };
+  }
+  return { status: 502, message: `Could not reach NVIDIA NIM: ${err.nimMessage || err.message}` };
 }
 
 // ─── Routes ────────────────────────────────────────────────────────────────
@@ -325,6 +434,28 @@ app.get('/v1/models', (req, res) => {
 app.post('/v1/chat/completions', async (req, res) => {
   let streamEndedCleanly = false;
   let upstreamStream = null;
+  let keepAliveTimer = null;
+  let lastWriteAt = Date.now();
+
+  // 'close' on the response before it finished means the client hung up.
+  // (req's own 'close' fires as soon as the body is read, so it can't tell.)
+  const clientGone = new AbortController();
+  res.on('close', () => {
+    clearInterval(keepAliveTimer);
+    if (!res.writableFinished) clientGone.abort();
+  });
+
+  const startSse = () => {
+    if (res.headersSent) return;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+  };
+  const writeToClient = data => {
+    lastWriteAt = Date.now();
+    return safeWrite(res, data);
+  };
 
   try {
     const {
@@ -333,14 +464,22 @@ app.post('/v1/chat/completions', async (req, res) => {
       temperature,
       max_tokens,
       stream
-    } = req.body;
+    } = req.body || {};
 
     // No default model: an unknown alias is an error, never a silent swap
     const nimModel = MODEL_MAPPING[model];
     if (!nimModel) {
+      const old = OLD_MODEL_NAMES[model];
+      const available = `Available models: ${Object.keys(MODEL_MAPPING).join(', ')}`;
+      let message = `Unknown model "${model}". ${available}`;
+      if (old?.now) {
+        message = `Model "${model}" has been renamed to "${old.now}" — change the model name in your client.`;
+      } else if (old?.retired) {
+        message = `Model "${model}" was removed because NVIDIA retired ${old.retired}. Try "${old.try}" instead. ${available}`;
+      }
       return res.status(400).json({
         error: {
-          message: `Unknown model "${model}". Available models: ${Object.keys(MODEL_MAPPING).join(', ')}`,
+          message,
           type: 'invalid_request_error',
           code: 'model_not_found'
         }
@@ -348,27 +487,32 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     const modelOptions = MODEL_OPTIONS[nimModel] || {};
 
+    const added = applyPromptAdditions(messages, PROMPT_ADDITIONS);
+    if (added.lore.length > 0) console.log(`[LORE] Added ${added.lore.length}: ${added.lore.join(', ')}`);
+    if (added.dropped.length > 0) console.log(`[LORE] Over the token budget, left out: ${added.dropped.join(', ')}`);
+
     const baseRequest = {
-      messages,
+      messages: added.messages,
       temperature: temperature ?? 0.7,
       max_tokens: Math.min((max_tokens ?? 2048) + (modelOptions.reasoningTokens || 0), MAX_TOKENS_LIMIT),
       stream: stream || false,
-      chat_template_kwargs: modelOptions.chat_template_kwargs,
-      // Models with their own chat_template_kwargs already carry the right
-      // thinking switch; don't send them a second, conflicting one
-      extra_body: ENABLE_THINKING_MODE && !modelOptions.chat_template_kwargs
-        ? { chat_template_kwargs: { thinking: true } }
-        : undefined
+      chat_template_kwargs: modelOptions.chat_template_kwargs
     };
 
-    const response = await callModel(baseRequest, nimModel);
+    if (stream && STREAM_KEEPALIVE_MS > 0) {
+      keepAliveTimer = setInterval(() => {
+        if (Date.now() - lastWriteAt < STREAM_KEEPALIVE_MS) return;
+        startSse();
+        writeToClient(': keep-alive\n\n');
+      }, Math.max(50, Math.floor(STREAM_KEEPALIVE_MS / 2)));
+    }
+
+    const response = await callModel(baseRequest, nimModel, clientGone.signal);
     upstreamStream = response.data;
     console.log('[PROXY] Model used:', nimModel);
 
     if (stream) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
+      startSse();
 
       const decoder = new StringDecoder('utf8');
       let buffer = '';
@@ -379,18 +523,20 @@ app.post('/v1/chat/completions', async (req, res) => {
       const cleanup = () => {
         if (cleanedUp) return;
         cleanedUp = true;
+        clearInterval(keepAliveTimer);
         if (upstreamStream) {
           upstreamStream.removeAllListeners();
+          // An error after cleanup must not crash the process
+          upstreamStream.on('error', () => {});
         }
-        req.removeAllListeners('close');
       };
 
       const processLine = (line) => {
         if (!line.startsWith('data: ')) return;
 
-        if (line.includes('[DONE]')) {
+        if (line.slice(6).trim() === '[DONE]') {
           if (!doneSent) {
-            safeWrite(res, 'data: [DONE]\n\n');
+            writeToClient('data: [DONE]\n\n');
             doneSent = true;
           }
           streamEndedCleanly = true;
@@ -426,12 +572,12 @@ app.post('/v1/chat/completions', async (req, res) => {
             delete delta.reasoning;
           }
 
-          safeWrite(res, `data: ${JSON.stringify(data)}\n\n`);
+          writeToClient(`data: ${JSON.stringify(data)}\n\n`);
 
         } catch (parseErr) {
           // FIX: Don't silently swallow—send error to client so they know data was lost
           console.warn('[STREAM] Invalid JSON line:', line.slice(0, 100));
-          safeWrite(res, `data: ${JSON.stringify({ 
+          writeToClient(`data: ${JSON.stringify({ 
             error: { 
               message: 'Upstream sent malformed chunk', 
               type: 'stream_parse_error',
@@ -446,13 +592,13 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         if (buffer.length > MAX_BUFFER_SIZE) {
           console.error('[STREAM] Buffer overflow, destroying connection');
-          safeWrite(res, `data: ${JSON.stringify({ 
+          writeToClient(`data: ${JSON.stringify({ 
             error: { 
               message: 'Stream buffer overflow', 
               type: 'stream_error' 
             } 
           })}\n\n`);
-          safeWrite(res, 'data: [DONE]\n\n');
+          writeToClient('data: [DONE]\n\n');
           res.end();
           upstreamStream.destroy();
           cleanup();
@@ -477,7 +623,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
 
         if (!doneSent) {
-          safeWrite(res, 'data: [DONE]\n\n');
+          writeToClient('data: [DONE]\n\n');
         }
 
         streamEndedCleanly = true;
@@ -491,32 +637,28 @@ app.post('/v1/chat/completions', async (req, res) => {
         console.error('[STREAM] Upstream error:', err.message);
         
         if (!res.writableEnded) {
-          safeWrite(res, `data: ${JSON.stringify({
+          writeToClient(`data: ${JSON.stringify({
             error: {
               message: 'Stream interrupted by upstream error',
               type: 'stream_error'
             }
           })}\n\n`);
-          safeWrite(res, 'data: [DONE]\n\n');
+          writeToClient('data: [DONE]\n\n');
           res.end();
         }
         cleanup();
       });
 
-      // FIX: Check req.destroyed (Node/Express 5) 
-      // Don't destroy already-finished streams
-      req.on('close', () => {
-        const clientGone = req.destroyed || !res.writable;
-        
-        if (!streamEndedCleanly && clientGone) {
-          console.warn('[STREAM] Client disconnected prematurely');
-        }
-
-        if (upstreamStream && !upstreamStream.destroyed && !streamEndedCleanly) {
-          upstreamStream.destroy();
+      // Client hung up mid-reply: stop pulling the rest from NVIDIA
+      const onClientGone = () => {
+        if (!streamEndedCleanly) {
+          console.warn('[STREAM] Client disconnected before the reply finished');
+          if (upstreamStream && !upstreamStream.destroyed) upstreamStream.destroy();
         }
         cleanup();
-      });
+      };
+      if (clientGone.signal.aborted) onClientGone();
+      else clientGone.signal.addEventListener('abort', onClientGone, { once: true });
 
     } else {
       // Non-streaming response
@@ -555,30 +697,39 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
   } catch (error) {
-    console.error('[PROXY] Fatal error:', error.message);
-    console.error('[PROXY] NIM response:', error.response?.data);
+    clearInterval(keepAliveTimer);
+
+    if (clientGone.signal.aborted) {
+      console.warn('[PROXY] Client disconnected before NVIDIA answered; request cancelled');
+      return;
+    }
+
+    const failure = upstreamFailure(error);
+    console.error(`[PROXY] Request failed (${failure.status}): ${failure.message}`);
 
     if (!res.headersSent) {
-      res.status(error.response?.status || 500).json({
+      res.status(failure.status).json({
         error: {
-          message: error.message,
-          type: 'invalid_request_error',
-          code: error.response?.status || 500
+          message: failure.message,
+          type: 'upstream_error',
+          code: failure.status
         }
       });
     } else if (!res.writableEnded) {
+      // Keep-alive already sent a 200, so the error goes in the stream
       safeWrite(res, `data: ${JSON.stringify({
         error: {
-          message: error.message,
-          type: 'proxy_error'
+          message: failure.message,
+          type: 'upstream_error',
+          code: failure.status
         }
       })}\n\n`);
       safeWrite(res, 'data: [DONE]\n\n');
       res.end();
     }
 
-    // Clean up upstream stream if we have it
-    if (upstreamStream && !upstreamStream.destroyed) {
+    // Clean up upstream stream if we have it (a plain request's body is an object)
+    if (typeof upstreamStream?.destroy === 'function' && !upstreamStream.destroyed) {
       upstreamStream.destroy();
     }
   }
@@ -591,6 +742,20 @@ app.use((req, res) => {
       message: `Endpoint ${req.method} ${req.path} not found`,
       type: 'invalid_request_error',
       code: 404
+    }
+  });
+});
+
+// Body-parser failures (bad JSON, too large) as JSON, never Express's HTML
+// error page, which includes a stack trace with server paths. Express only
+// treats a handler with all four arguments as an error handler.
+app.use((err, req, res, next) => {
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({
+    error: {
+      message: err.type === 'entity.parse.failed' ? 'Request body is not valid JSON' : (status < 500 ? err.message : 'Internal error'),
+      type: 'invalid_request_error',
+      code: status
     }
   });
 });
