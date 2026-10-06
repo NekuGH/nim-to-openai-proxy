@@ -36,7 +36,7 @@ async function startProxy(nimUrl, extraEnv = {}) {
     delete env[k];
   }
   for (const k of ['SHOW_REASONING', 'ENABLE_THINKING_MODE', 'SKIP_VALIDATION', 'DISCORD_WEBHOOK_URL',
-    'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT', 'REQUEST_TIMEOUT_MS', 'STREAM_KEEPALIVE_MS',
+    'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT', 'REQUEST_TIMEOUT_MS', 'KEEPALIVE_MS',
     'INSTRUCTIONS_PATH', 'INSTRUCTIONS_POSITION', 'LOREBOOK_PATH', 'LOREBOOK_SCAN_DEPTH', 'LOREBOOK_TOKEN_BUDGET']) {
     delete env[k];
   }
@@ -487,11 +487,11 @@ describe('upstream timeout', () => {
     }
   });
 
-  it('keeps the 15 s keep-alive when STREAM_KEEPALIVE_MS is unusable, and 0 turns it off', async () => {
+  it('keeps the 15 s keep-alive when KEEPALIVE_MS is unusable, and 0 turns it off', async () => {
     for (const [value, expected] of [['5000000000', 'every 15s'], ['soon', 'every 15s'], ['0', 'OFF']]) {
-      const proxy = await startProxy(slowNim.url, { STREAM_KEEPALIVE_MS: value, SKIP_VALIDATION: 'true' });
+      const proxy = await startProxy(slowNim.url, { KEEPALIVE_MS: value, SKIP_VALIDATION: 'true' });
       try {
-        assert.ok(proxy.logs().includes(`[CONFIG] Stream keep-alive: ${expected}`), `${value}: ${proxy.logs()}`);
+        assert.ok(proxy.logs().includes(`[CONFIG] Keep-alive: ${expected}`), `${value}: ${proxy.logs()}`);
       } finally {
         await proxy.stop();
       }
@@ -586,7 +586,7 @@ describe('NVIDIA errors and retries', () => {
 
 // ─── Keep-alive and client hang-ups ────────────────────────────────────────
 
-describe('stream keep-alive and client hang-ups', () => {
+describe('keep-alive and client hang-ups', () => {
   const started = [];
   after(async () => {
     for (const { proxy, nim } of started) {
@@ -596,7 +596,7 @@ describe('stream keep-alive and client hang-ups', () => {
   });
   const setup = async (mockOptions, env = {}) => {
     const nim = await startMockNim(mockOptions);
-    const proxy = await startProxy(nim.url, { SKIP_VALIDATION: 'true', STREAM_KEEPALIVE_MS: '200', ...env });
+    const proxy = await startProxy(nim.url, { SKIP_VALIDATION: 'true', KEEPALIVE_MS: '200', ...env });
     started.push({ proxy, nim });
     return { proxy, nim };
   };
@@ -613,11 +613,35 @@ describe('stream keep-alive and client hang-ups', () => {
     assert.equal(streamedContent(parseSse(text)), answerFor('z-ai/glm-5.3'));
   });
 
-  it('does not ping a plain (non-streaming) request', async () => {
-    const { proxy } = await setup({ headerDelayMs: 800 });
+  it('keeps a plain (non-streaming) request alive with newlines that still parse as JSON', async () => {
+    const { proxy } = await setup({ headerDelayMs: 1200 });
     const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES });
     assert.equal(res.status, 200);
-    assert.equal((await res.json()).choices[0].message.content, answerFor('z-ai/glm-5.3'));
+    assert.match(res.headers.get('content-type'), /^application\/json/);
+    const text = await res.text();
+
+    const leading = text.match(/^\n*/)[0].length;
+    assert.ok(leading >= 3, `expected several keep-alive newlines, got ${leading}`);
+    const body = JSON.parse(text);
+    assert.equal(body.choices[0].message.content, answerFor('z-ai/glm-5.3'));
+    assert.equal(body.object, 'chat.completion');
+  });
+
+  it('answers a quick plain request normally, with no filler', async () => {
+    const { proxy } = await setup({});
+    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES });
+    const text = await res.text();
+    assert.ok(text.startsWith('{'), JSON.stringify(text.slice(0, 20)));
+  });
+
+  it('reports an NVIDIA error in the JSON body once a plain reply has started', async () => {
+    const { proxy } = await setup({ headerDelayMs: 700, failures: [GONE] });
+    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES });
+    assert.equal(res.status, 200, 'the 200 was already sent by keep-alive');
+    const body = JSON.parse(await res.text());
+    assert.equal(body.error.code, 410);
+    assert.equal(body.error.message, `NVIDIA NIM error 410: ${GONE.body.detail}`);
+    assert.equal(body.choices, undefined);
   });
 
   it('reports an NVIDIA error inside the stream once pings have started', async () => {

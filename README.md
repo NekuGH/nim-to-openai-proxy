@@ -85,7 +85,7 @@ A model name that isn't in the table above is rejected with an "Unknown model" e
 NVIDIA's free tier is often overloaded. GLM and DeepSeek have been measured taking 1 to 3+ minutes before they send the first word. The proxy is built for that:
 
 - It waits up to **8 minutes** (`REQUEST_TIMEOUT_MS`) for NVIDIA to start answering, and allows up to 8 minutes of silence mid-reply. A reply that keeps streaming is never cut off.
-- While a streamed reply hasn't started, it sends your client a small "keep-alive" ping every 15 seconds (`STREAM_KEEPALIVE_MS`), so JanitorAI doesn't decide the connection is dead. These pings are invisible in the chat.
+- While a reply hasn't started, it sends a small "keep-alive" every 15 seconds (`KEEPALIVE_MS`): a comment line for streamed replies, a blank line before the JSON otherwise. Both are invisible in the chat. This matters on Render, which runs every service behind Cloudflare: Cloudflare drops a request that hasn't started answering within about 100 seconds, and the browser then only shows "NetworkError when attempting to fetch resource". GLM often thinks longer than that before its first word.
 - If you close the chat or hit stop, the proxy cancels the request at NVIDIA too, so it doesn't eat your rate limit.
 
 ### Instructions and lorebooks
@@ -148,7 +148,7 @@ After deploying, you can set these in your host's environment settings (Render: 
 | `GLM_REASONING_EFFORT` | `low` / `high` / `max` | How long `glm-5.3` and `glm-5.3-flash` think before replying (default `low`) |
 | `DEEPSEEK_REASONING_EFFORT` | `low` / `high` / `max` | How long `deepseek-v4.1-flash` thinks when `ENABLE_THINKING_MODE=true` (default `high`) |
 | `REQUEST_TIMEOUT_MS` | milliseconds | How long to wait for NVIDIA, for every model (default `480000` = 8 minutes): both for it to start answering and for the longest silence in the middle of a reply. A reply that keeps streaming is never cut off |
-| `STREAM_KEEPALIVE_MS` | milliseconds | How often a waiting streamed reply gets an invisible keep-alive ping (default `15000`; `0` turns it off) |
+| `KEEPALIVE_MS` | milliseconds | How often a waiting reply gets an invisible keep-alive (default `15000`; `0` turns it off). Keep it well under 100 s on Render |
 | `INSTRUCTIONS_POSITION` | `bottom` / `top` | Where the instructions go: after the chat (default) or in the system prompt |
 | `INSTRUCTIONS_PATH` | file path | Check this file for instructions first, before the usual places |
 | `LOREBOOK_PATH` | file or folder paths, comma-separated | Extra lorebooks to load |
@@ -156,7 +156,7 @@ After deploying, you can set these in your host's environment settings (Render: 
 | `LOREBOOK_TOKEN_BUDGET` | number | Roughly how many tokens of lore can be added per message (default `2048`) |
 
 
-For the `true` switches, set `false` or remove the variable to turn them off; `STREAM_KEEPALIVE_MS=0` turns keep-alive off. The proxy reads these when it starts, so a change takes effect after the next deploy (on Render, "Save and deploy"). A value it can't use is ignored with a warning in the log.
+For the `true` switches, set `false` or remove the variable to turn them off; `KEEPALIVE_MS=0` turns keep-alive off. The proxy reads these when it starts, so a change takes effect after the next deploy (on Render, "Save and deploy"). A value it can't use is ignored with a warning in the log.
 
 ### Troubleshooting
 
@@ -169,6 +169,7 @@ For the `true` switches, set `false` or remove the variable to turn them off; `S
 | "NVIDIA NIM error 410: … reached its end of life" | NVIDIA retired that model | Pick another model; the error names the retired one |
 | Filter interrupts RP | Using Chinese-hosted model for mature content | Use one of the `nemotron-…` models |
 | "Forbidden: Invalid or missing authentication" (403) | The API key in your client doesn't match `CLIENT_AUTH_KEY` | Make them identical, then reload the client page |
+| "A network error occurred… NetworkError when attempting to fetch resource", only with slow models (GLM) | Render's Cloudflare edge cut a reply that hadn't started within ~100 s | Fixed by the keep-alive above; make sure `KEEPALIVE_MS` isn't `0` |
 | "Failed to fetch (unk)" / "A network error occurred" | JanitorAI cached old proxy config after changing URL or model | **Reload the page** — changes don't apply until refresh |
 
 **A reply fails after a while?** Your host's log (Render: **Logs**) says which side gave up:
