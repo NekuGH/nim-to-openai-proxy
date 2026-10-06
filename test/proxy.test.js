@@ -474,11 +474,24 @@ describe('upstream timeout', () => {
     assert.ok(elapsed >= 900 && elapsed < 2500, `took ${elapsed} ms`);
   });
 
-  it('falls back to 480 s when REQUEST_TIMEOUT_MS is not a positive number', async () => {
-    for (const bad of ['abc', '0', '-5']) {
+  it('falls back to 480 s when REQUEST_TIMEOUT_MS is not a usable number', async () => {
+    // 9999999999 ms overflows Node's timers, which would then fire at once
+    for (const bad of ['abc', '0', '-5', '1.5', '9999999999']) {
       const proxy = await startProxy(slowNim.url, { REQUEST_TIMEOUT_MS: bad, SKIP_VALIDATION: 'true' });
       try {
         assert.ok(proxy.logs().includes('[CONFIG] Upstream timeout: 480s'), `${bad}: ${proxy.logs()}`);
+        assert.ok(proxy.logs().includes(`Ignoring REQUEST_TIMEOUT_MS=${bad}`), `${bad}: ${proxy.logs()}`);
+      } finally {
+        await proxy.stop();
+      }
+    }
+  });
+
+  it('keeps the 15 s keep-alive when STREAM_KEEPALIVE_MS is unusable, and 0 turns it off', async () => {
+    for (const [value, expected] of [['5000000000', 'every 15s'], ['soon', 'every 15s'], ['0', 'OFF']]) {
+      const proxy = await startProxy(slowNim.url, { STREAM_KEEPALIVE_MS: value, SKIP_VALIDATION: 'true' });
+      try {
+        assert.ok(proxy.logs().includes(`[CONFIG] Stream keep-alive: ${expected}`), `${value}: ${proxy.logs()}`);
       } finally {
         await proxy.stop();
       }
@@ -534,6 +547,40 @@ describe('NVIDIA errors and retries', () => {
     const res = await chat(proxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES, stream: true });
     assert.equal(res.status, 503);
     assert.equal(nim.requests.length, 2);
+  });
+
+  it('does not retry a 503 that only came after a long wait', async () => {
+    // With a 2 s timeout, "quickly" means within 0.5 s; this one takes 0.7 s
+    const { proxy, nim } = await setup({ headerDelayMs: 700, failures: [{ status: 503 }] }, { REQUEST_TIMEOUT_MS: '2000' });
+    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES });
+    assert.equal(res.status, 503);
+    assert.equal(nim.requests.length, 1);
+  });
+
+  it('retries a plain reply that was cut off after it started, and reports a second cut-off as 502', async () => {
+    const once = await setup({ failures: [{ cutOff: true }] });
+    const ok = await chat(once.proxy, { model: 'glm-5.3', messages: MESSAGES });
+    assert.equal(ok.status, 200);
+    assert.equal((await ok.json()).choices[0].message.content, answerFor('z-ai/glm-5.3'));
+    assert.equal(once.nim.requests.length, 2);
+
+    const twice = await setup({ failures: [{ cutOff: true }, { cutOff: true }] });
+    const bad = await chat(twice.proxy, { model: 'glm-5.3', messages: MESSAGES });
+    assert.equal(bad.status, 502);
+    assert.match((await bad.json()).error.message, /cut off before it finished/);
+    assert.equal(twice.nim.requests.length, 2);
+  });
+
+  it('waits and retries the same model on 429, up to two more times', async () => {
+    const once = await setup({ failures: [{ status: 429 }] });
+    const ok = await chat(once.proxy, { model: 'nemotron-3-ultra', messages: MESSAGES });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(once.nim.requests.map(r => r.model), ['nvidia/nemotron-3-ultra-550b-a55b', 'nvidia/nemotron-3-ultra-550b-a55b']);
+
+    const always = await setup({ failures: [{ status: 529 }, { status: 529 }, { status: 529 }, { status: 529 }] });
+    const bad = await chat(always.proxy, { model: 'nemotron-3-ultra', messages: MESSAGES });
+    assert.equal(bad.status, 529);
+    assert.equal(always.nim.requests.length, 3);
   });
 });
 
@@ -603,6 +650,10 @@ describe('stream keep-alive and client hang-ups', () => {
 
     await proxy.waitForLog('Client disconnected before the reply finished', 2000);
     await waitFor(() => nim.disconnects() === 1, 'NVIDIA connection was not closed');
+    await new Promise(r => setTimeout(r, 100));
+    // A hang-up is the client's doing; it must not read as an NVIDIA failure
+    assert.ok(!proxy.logs().includes('[STREAM] Upstream error'), proxy.logs());
+    assert.equal(proxy.logs().split('Client disconnected before the reply finished').length - 1, 1, proxy.logs());
   });
 });
 

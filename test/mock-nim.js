@@ -17,7 +17,8 @@
 // startMockNim({ headerDelayMs, midStreamSilenceMs }) imitates an overloaded
 // NIM: a long wait before it answers at all, or a stream that goes quiet
 // after its first bytes. `failures` is a list of { status, body } answered,
-// in order, to the first chat requests instead of a reply; `answer` replaces
+// in order, to the first chat requests instead of a reply ({ cutOff: true }
+// instead sends 200 and half a body, then drops the connection); `answer` replaces
 // the reply text and `chunkSize` sets how many characters each streamed piece
 // of it carries.
 
@@ -229,6 +230,11 @@ function startMockNim({ headerDelayMs = 0, midStreamSilenceMs = 0, failures = []
         if (res.destroyed) return;
 
         const failure = pendingFailures.shift();
+        if (failure?.cutOff) {
+          res.writeHead(200, { 'Content-Type': body.stream ? 'text/event-stream' : 'application/json' });
+          res.write(body.stream ? 'data: {"choices":[{"delta":{"content":"Hal' : '{"id":"x","choices":[{"message":{"content":"Hal');
+          return setTimeout(() => res.destroy(), 50);
+        }
         if (failure) return sendJson(res, failure.status, failure.body ?? { error: { message: `mock failure ${failure.status}` } });
 
         if (body.stream) return streamCompletion(res, body, p, { silenceMs: midStreamSilenceMs, answerOverride: answer, chunkSize });

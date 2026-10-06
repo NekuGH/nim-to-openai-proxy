@@ -30,21 +30,29 @@ const DEEPSEEK_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.DE
   : 'high';
 
 const MAX_TOKENS_LIMIT = 65536;
+
+// Milliseconds from an env var, or the fallback when it isn't a whole number in
+// range. Node timers can't hold more than 2^31-1 ms; beyond that they fire at once.
+const MAX_TIMER_MS = 2147483647;
+function envMs(name, fallback, { allowZero = false } = {}) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n <= MAX_TIMER_MS && (n > 0 || (allowZero && n === 0))) return n;
+  console.warn(`[CONFIG] Ignoring ${name}=${raw}: expected whole milliseconds${allowZero ? ' (0 to turn off)' : ''} up to ${MAX_TIMER_MS}`);
+  return fallback;
+}
+
 // How long to wait on NIM, for every model: both for it to start answering and
 // for the longest silence mid-stream (a stream that keeps sending has no cap).
 // NVIDIA's free tier is often overloaded and can queue a request for minutes.
-const DEFAULT_REQUEST_TIMEOUT_MS = 480000;
-const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.REQUEST_TIMEOUT_MS, 10) > 0
-  ? Number.parseInt(process.env.REQUEST_TIMEOUT_MS, 10)
-  : DEFAULT_REQUEST_TIMEOUT_MS;
+const REQUEST_TIMEOUT_MS = envMs('REQUEST_TIMEOUT_MS', 480000);
 const VALIDATION_TIMEOUT_MS = 15000;
 const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
 // A streaming client hears nothing while NVIDIA queues a request, and may give
 // up. After this much silence it gets an SSE comment line, which clients
 // ignore (OpenRouter does the same). 0 turns it off.
-const STREAM_KEEPALIVE_MS = Number.parseInt(process.env.STREAM_KEEPALIVE_MS, 10) >= 0
-  ? Number.parseInt(process.env.STREAM_KEEPALIVE_MS, 10)
-  : 15000;
+const STREAM_KEEPALIVE_MS = envMs('STREAM_KEEPALIVE_MS', 15000, { allowZero: true });
 
 console.log(`[CONFIG] Upstream timeout: ${REQUEST_TIMEOUT_MS / 1000}s`);
 console.log(STREAM_KEEPALIVE_MS > 0
@@ -289,6 +297,7 @@ function safeWrite(res, data) {
 // ─── Helper: Upstream Call ──────────────────────────────────────────────────
 
 const sleep = (ms, signal) => new Promise(resolve => {
+  if (signal?.aborted) return resolve();
   const timer = setTimeout(resolve, ms);
   signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
 });
@@ -338,7 +347,13 @@ const HICCUP_STATUSES = [502, 503, 504];
 const HICCUP_CODES = ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'EAI_AGAIN'];
 const HICCUP_RETRIES = 1;
 const HICCUP_DELAY_MS = 2000;
-const FAST_FAILURE_MS = 30000;
+// "Quickly" means within 30 s, or a quarter of the timeout if that is shorter
+const FAST_FAILURE_MS = Math.min(30000, Math.floor(REQUEST_TIMEOUT_MS / 4));
+
+// NVIDIA sent a success status, then the body broke off (connection reset, or
+// silence until our timeout). axios reports it as an error that still carries
+// the 2xx response, which must not be mistaken for an NVIDIA error status.
+const cutOffAfterHeaders = err => Boolean(err.response) && err.response.status < 400;
 
 // Calls exactly one model and never switches to a different one. Stops early
 // when `signal` fires (the client hung up). Rejected errors carry
@@ -381,7 +396,7 @@ async function callModel(baseRequest, model, signal) {
         rateLimitRetries++;
         delay = RATE_LIMIT_DELAY_MS;
       } else if (
-        (HICCUP_STATUSES.includes(status) || (!err.response && HICCUP_CODES.includes(err.code))) &&
+        (HICCUP_STATUSES.includes(status) || (!err.response && HICCUP_CODES.includes(err.code)) || cutOffAfterHeaders(err)) &&
         elapsed < FAST_FAILURE_MS &&
         hiccupRetries < HICCUP_RETRIES
       ) {
@@ -403,6 +418,9 @@ function upstreamFailure(err) {
       status: 504,
       message: `NVIDIA did not start answering within ${REQUEST_TIMEOUT_MS / 1000}s — it is probably overloaded. Try again, or pick another model.`
     };
+  }
+  if (cutOffAfterHeaders(err)) {
+    return { status: 502, message: `NVIDIA's reply was cut off before it finished: ${err.message}. Try again.` };
   }
   if (err.response) {
     return {
@@ -633,7 +651,21 @@ app.post('/v1/chat/completions', async (req, res) => {
         cleanup();
       });
 
+      // Client hung up mid-reply: stop pulling the rest from NVIDIA
+      let hangUpHandled = false;
+      const onClientGone = () => {
+        if (hangUpHandled) return;
+        hangUpHandled = true;
+        if (!streamEndedCleanly) {
+          console.warn('[STREAM] Client disconnected before the reply finished');
+          if (upstreamStream && !upstreamStream.destroyed) upstreamStream.destroy();
+        }
+        cleanup();
+      };
+
       upstreamStream.on('error', err => {
+        // Our own cancel after a client hang-up surfaces here too; it is not NVIDIA's fault
+        if (clientGone.signal.aborted || axios.isCancel(err)) return onClientGone();
         console.error('[STREAM] Upstream error:', err.message);
         
         if (!res.writableEnded) {
@@ -649,14 +681,6 @@ app.post('/v1/chat/completions', async (req, res) => {
         cleanup();
       });
 
-      // Client hung up mid-reply: stop pulling the rest from NVIDIA
-      const onClientGone = () => {
-        if (!streamEndedCleanly) {
-          console.warn('[STREAM] Client disconnected before the reply finished');
-          if (upstreamStream && !upstreamStream.destroyed) upstreamStream.destroy();
-        }
-        cleanup();
-      };
       if (clientGone.signal.aborted) onClientGone();
       else clientGone.signal.addEventListener('abort', onClientGone, { once: true });
 

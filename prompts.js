@@ -56,34 +56,44 @@ function positiveInt(value, fallback) {
   return n > 0 ? n : fallback;
 }
 
-function findInstructions(env, secretsDir, useDefaults) {
+function findInstructions(env, { secretsDir, repoDir, useDefaults, log }) {
+  if (env.INSTRUCTIONS_PATH && !isFile(env.INSTRUCTIONS_PATH)) {
+    log.warn(`[PROMPTS] INSTRUCTIONS_PATH ${env.INSTRUCTIONS_PATH} is not a file; looking in the usual places`);
+  }
   const candidates = [
     env.INSTRUCTIONS_PATH,
     ...(useDefaults ? [
       path.join(secretsDir, 'instructions.md'),
       path.join(secretsDir, 'instructions.txt'),
-      path.join(REPO_DIR, 'prompts', 'instructions.md'),
-      path.join(REPO_DIR, 'prompts', 'instructions.txt')
+      path.join(repoDir, 'prompts', 'instructions.md'),
+      path.join(repoDir, 'prompts', 'instructions.txt')
     ] : [])
   ].filter(Boolean);
 
   for (const file of candidates) {
     if (!isFile(file)) continue;
-    const text = fs.readFileSync(file, 'utf8').trim();
+    let text;
+    try {
+      text = fs.readFileSync(file, 'utf8').trim();
+    } catch (err) {
+      log.warn(`[PROMPTS] Skipped ${file}: ${err.message}`);
+      continue;
+    }
     if (text) return { text, source: file };
   }
   return null;
 }
 
-function findLorebookFiles(env, secretsDir, useDefaults) {
+function findLorebookFiles(env, { secretsDir, repoDir, useDefaults, log }) {
   const files = [];
   for (const entry of (env.LOREBOOK_PATH || '').split(',').map(s => s.trim()).filter(Boolean)) {
     if (isFile(entry)) files.push(entry);
-    else files.push(...listDir(entry, /\.json$/i));
+    else if (fs.existsSync(entry)) files.push(...listDir(entry, /\.json$/i));
+    else log.warn(`[LORE] LOREBOOK_PATH entry ${entry} does not exist`);
   }
   if (useDefaults) {
     files.push(...listDir(secretsDir, /^lorebook.*\.json$/i));
-    files.push(...listDir(path.join(REPO_DIR, 'lorebooks'), /\.json$/i));
+    files.push(...listDir(path.join(repoDir, 'lorebooks'), /\.json$/i));
   }
   return [...new Set(files.map(f => path.resolve(f)))];
 }
@@ -165,8 +175,9 @@ function parseLorebook(json, fallbackName) {
 const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // /pattern/flags keys are regular expressions. With wholeWords, "kot" must
-// not match "kotlet" even around Polish letters, so word edges are any letter
-// or digit in any script rather than ASCII-only \b
+// not match "kotlet" even around Polish letters, so word edges are any letter,
+// combining mark or digit in any script rather than ASCII-only \b. Plain keys
+// and the scanned text are both compared in Unicode NFC form.
 function keyMatcher(key, { caseSensitive, wholeWords }) {
   const asRegex = key.match(/^\/(.+)\/([a-z]*)$/s);
   if (asRegex) {
@@ -177,8 +188,8 @@ function keyMatcher(key, { caseSensitive, wholeWords }) {
       // Not a valid regex after all: treat it as plain text
     }
   }
-  const body = escapeRegExp(key);
-  const edged = wholeWords ? `(?<![\\p{L}\\p{N}_])${body}(?![\\p{L}\\p{N}_])` : body;
+  const body = escapeRegExp(key.normalize('NFC'));
+  const edged = wholeWords ? `(?<![\\p{L}\\p{M}\\p{N}_])${body}(?![\\p{L}\\p{M}\\p{N}_])` : body;
   const re = new RegExp(edged, caseSensitive ? 'u' : 'iu');
   return text => re.test(text);
 }
@@ -199,9 +210,9 @@ function entryMatches(entry, text) {
 }
 
 function textOf(content) {
-  if (typeof content === 'string') return content;
+  if (typeof content === 'string') return content.normalize('NFC');
   if (Array.isArray(content)) {
-    return content.map(p => (typeof p === 'string' ? p : p?.type === 'text' ? p.text || '' : '')).join('\n');
+    return content.map(p => (typeof p === 'string' ? p : p?.type === 'text' ? p.text || '' : '')).join('\n').normalize('NFC');
   }
   return '';
 }
@@ -295,7 +306,7 @@ function applyPromptAdditions(messages, config) {
  * Reads instructions and lorebooks from disk. Problems are logged and skipped,
  * never fatal: a broken lorebook must not take the proxy down.
  */
-function loadPromptAdditions({ env = process.env, log = console, secretsDir = SECRETS_DIR } = {}) {
+function loadPromptAdditions({ env = process.env, log = console, secretsDir = SECRETS_DIR, repoDir = REPO_DIR } = {}) {
   const config = {
     instructions: null,
     instructionsPosition: env.INSTRUCTIONS_POSITION === 'top' ? 'top' : 'bottom',
@@ -307,24 +318,27 @@ function loadPromptAdditions({ env = process.env, log = console, secretsDir = SE
   // The tests turn the default locations off so files on the machine can't leak in
   const useDefaults = env.PROMPT_FILES_DEFAULT_LOCATIONS !== 'off';
 
-  const found = findInstructions(env, secretsDir, useDefaults);
+  const where = { secretsDir, repoDir, useDefaults, log };
+
+  const found = findInstructions(env, where);
   if (found) {
     config.instructions = found.text;
     log.log(`[PROMPTS] Instructions: ${found.text.length} chars from ${found.source} (added at the ${config.instructionsPosition})`);
   }
 
-  for (const file of findLorebookFiles(env, secretsDir, useDefaults)) {
+  for (const file of findLorebookFiles(env, where)) {
     try {
       const book = parseLorebook(JSON.parse(fs.readFileSync(file, 'utf8')), path.basename(file, '.json'));
       config.books.push(book);
       const scope = book.characters.length ? ` for ${book.characters.join(', ')}` : '';
-      log.log(`[LORE] Loaded "${book.name}" (${book.entries.length} entries${scope}) from ${file}`);
+      const depth = book.scanDepth ? `, its own scan depth ${book.scanDepth}` : '';
+      log.log(`[LORE] Loaded "${book.name}" (${book.entries.length} entries${scope}${depth}) from ${file}`);
     } catch (err) {
       log.warn(`[LORE] Skipped ${file}: ${err.message}`);
     }
   }
   if (config.books.length > 0) {
-    log.log(`[LORE] Scanning the last ${config.scanDepth} messages, up to ~${config.tokenBudget} tokens of lore per request`);
+    log.log(`[LORE] Scanning the last ${config.scanDepth} messages (unless a book sets its own), up to ~${config.tokenBudget} tokens of lore per request`);
   }
 
   return config;

@@ -75,6 +75,17 @@ describe('matching keywords', () => {
     const polish = [{ keys: ['Łódź'], content: 'A city.', extensions: { match_whole_words: true } }];
     assert.deepEqual(lore(polish, [user('Jedziemy do łódź jutro.')]).lore, ['Łódź']);
     assert.deepEqual(lore(polish, [user('Jedziemy do Łódźki.')]).lore, []);
+    assert.deepEqual(lore(entries, [user('Pięć kotów.')]).lore, [], 'ó is a letter, so kot is not a whole word here');
+  });
+
+  it('treats combining accents as part of a word, and compares text in NFC form', () => {
+    const pan = [{ keys: ['pan'], content: 'x', extensions: { match_whole_words: true } }];
+    assert.deepEqual(lore(pan, [user('Dobre pan\u0301stwo')]).lore, [], 'decomposed "państwo"');
+    assert.deepEqual(lore(pan, [user('Dzień dobry, pan Jan')]).lore, ['pan']);
+    const ram = [{ keys: ['राम'], content: 'x', extensions: { match_whole_words: true } }];
+    assert.deepEqual(lore(ram, [user('रामायण')]).lore, [], 'a vowel sign continues the word');
+    const lodz = [{ keys: ['Łódź'], content: 'x' }];
+    assert.deepEqual(lore(lodz, [user('Jedziemy do \u0141o\u0301dz\u0301')]).lore, ['Łódź'], 'decomposed text still matches');
   });
 
   it('honours case-sensitive entries', () => {
@@ -178,13 +189,45 @@ describe('loading files', () => {
       fs.writeFileSync(path.join(dir, 'notes.json'), JSON.stringify({ entries: [{ keys: ['b'], content: 'B' }] }));
       const logs = [];
       const log = { log: m => logs.push(m), warn: m => logs.push(m) };
-      const loaded = loadPromptAdditions({ env: {}, log, secretsDir: dir });
+      const emptyRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'repo-'));
+      const loaded = loadPromptAdditions({ env: {}, log, secretsDir: dir, repoDir: emptyRepo });
+      fs.rmSync(emptyRepo, { recursive: true, force: true });
       assert.equal(loaded.instructions, 'Be vivid.');
       assert.equal(loaded.instructionsPosition, 'bottom');
       assert.deepEqual(loaded.books.map(b => b.name), ['lorebook-world'], 'only lorebook*.json files count');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('skips an instructions file it cannot read instead of crashing', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secrets-'));
+    const unreadable = path.join(dir, 'instructions.md');
+    fs.writeFileSync(unreadable, 'secret');
+    fs.writeFileSync(path.join(dir, 'instructions.txt'), 'Fallback rules.');
+    const realRead = fs.readFileSync;
+    fs.readFileSync = (file, ...rest) => {
+      if (file === unreadable) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      return realRead(file, ...rest);
+    };
+    try {
+      const warnings = [];
+      const loaded = loadPromptAdditions({ env: {}, log: { log() {}, warn: m => warnings.push(m) }, secretsDir: dir, repoDir: dir });
+      assert.equal(loaded.instructions, 'Fallback rules.');
+      assert.match(warnings.join('\n'), /Skipped .*instructions\.md: EACCES/);
+    } finally {
+      fs.readFileSync = realRead;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('warns about INSTRUCTIONS_PATH and LOREBOOK_PATH entries that do not exist', () => {
+    const warnings = [];
+    loadPromptAdditions({
+      env: { INSTRUCTIONS_PATH: '/nope/rules.md', LOREBOOK_PATH: '/nope/books', PROMPT_FILES_DEFAULT_LOCATIONS: 'off' },
+      log: { log() {}, warn: m => warnings.push(m) }
+    });
+    assert.equal(warnings.length, 2, warnings.join('\n'));
   });
 
   it('reads the scan depth, budget and position from the environment', () => {
