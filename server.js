@@ -347,7 +347,7 @@ const RATE_LIMIT_DELAY_MS = 4000;
 // A hiccup between us and the model (bad gateway, briefly unavailable, dropped
 // connection): one more try, but only when it failed quickly — a gateway
 // timeout after minutes in NVIDIA's queue is not worth waiting through twice
-const HICCUP_STATUSES = [502, 503, 504];
+const HICCUP_STATUSES = [500, 502, 503, 504];
 const HICCUP_CODES = ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'EAI_AGAIN'];
 const HICCUP_RETRIES = 1;
 const HICCUP_DELAY_MS = 2000;
@@ -388,6 +388,7 @@ async function callModel(baseRequest, model, signal) {
 
       const status = err.response?.status;
       const elapsed = Date.now() - started;
+      err.nimModel = model;
       err.nimMessage = await describeUpstreamError(err);
       console.warn(
         `[PROXY] ${model} failed (attempt ${attempt}) after ${(elapsed / 1000).toFixed(1)}s:`,
@@ -415,6 +416,17 @@ async function callModel(baseRequest, model, signal) {
   }
 }
 
+// What NVIDIA's bare status codes usually mean, for errors that come without
+// a useful message of their own
+const STATUS_HINTS = {
+  401: 'NIM_API_KEY is wrong or expired — make a new key at build.nvidia.com.',
+  404: 'NVIDIA is not serving this model to your API key right now: it may have been pulled, or newer models may need the "Public API Endpoints" permission on your build.nvidia.com account. Try another model.',
+  500: "NVIDIA's server failed while writing the reply. This is usually temporary: try again, or pick another model.",
+  502: 'NVIDIA could not reach the model. Usually temporary: try again.',
+  503: 'NVIDIA has no capacity for this model right now. Try again later or pick another model.',
+  504: 'NVIDIA gave up waiting for the model; it is overloaded. Try again later or pick another model.'
+};
+
 // What the client is told when the upstream call fails
 function upstreamFailure(err) {
   if (err.code === 'ECONNABORTED' && !err.response && /timeout/i.test(err.message)) {
@@ -427,10 +439,12 @@ function upstreamFailure(err) {
     return { status: 502, message: `NVIDIA's reply was cut off before it finished: ${err.message}. Try again.` };
   }
   if (err.response) {
-    return {
-      status: err.response.status,
-      message: `NVIDIA NIM error ${err.response.status}: ${err.nimMessage || err.message}`
-    };
+    const status = err.response.status;
+    // axios's own "Request failed with status code N" adds nothing to the status
+    const detail = err.nimMessage && !/^Request failed with status code \d+$/.test(err.nimMessage) ? err.nimMessage : '';
+    const hint = STATUS_HINTS[status] || '';
+    const text = [detail, hint].filter(Boolean).join(' — ') || err.message;
+    return { status, message: `NVIDIA NIM error ${status} (${err.nimModel}): ${text}` };
   }
   return { status: 502, message: `Could not reach NVIDIA NIM: ${err.nimMessage || err.message}` };
 }

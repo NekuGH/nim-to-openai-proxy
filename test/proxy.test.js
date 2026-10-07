@@ -528,11 +528,36 @@ describe('NVIDIA errors and retries', () => {
       const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES, stream });
       assert.equal(res.status, 410);
       const { error } = await res.json();
-      assert.equal(error.message, `NVIDIA NIM error 410: ${GONE.body.detail}`);
+      assert.equal(error.message, `NVIDIA NIM error 410 (z-ai/glm-5.3): ${GONE.body.detail}`);
       assert.equal(nim.requests.length, 1, '410 must not be retried');
       assert.ok(proxy.logs().includes(GONE.body.detail), 'NVIDIA message missing from the log');
     });
   }
+
+  it('names the model and explains a bare 404 that came with an empty body', async () => {
+    const { proxy, nim } = await setup({ failures: [{ status: 404, raw: '' }] });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream: true });
+    assert.equal(res.status, 404);
+    const { error } = await res.json();
+    assert.match(error.message, /^NVIDIA NIM error 404 \(z-ai\/glm-5\.3-flash\): NVIDIA is not serving this model/);
+    assert.ok(!error.message.includes('Request failed with status code'), error.message);
+    assert.equal(nim.requests.length, 1, '404 must not be retried');
+  });
+
+  it("retries a quick 500 once, and explains it if it happens again", async () => {
+    const INFERENCE_500 = { status: 500, body: { status: 500, title: 'Internal Server Error', detail: 'Internal error while making inference request' } };
+    const once = await setup({ failures: [INFERENCE_500] });
+    const ok = await chat(once.proxy, { model: 'glm-5.3', messages: MESSAGES });
+    assert.equal(ok.status, 200);
+    assert.equal(once.nim.requests.length, 2);
+
+    const twice = await setup({ failures: [INFERENCE_500, INFERENCE_500] });
+    const bad = await chat(twice.proxy, { model: 'glm-5.3', messages: MESSAGES });
+    assert.equal(bad.status, 500);
+    assert.equal((await bad.json()).error.message,
+      "NVIDIA NIM error 500 (z-ai/glm-5.3): Internal error while making inference request — NVIDIA's server failed while writing the reply. This is usually temporary: try again, or pick another model.");
+    assert.equal(twice.nim.requests.length, 2);
+  });
 
   it('retries once after a quick 503 and then succeeds', async () => {
     const { proxy, nim } = await setup({ failures: [{ status: 503 }] });
@@ -640,7 +665,7 @@ describe('keep-alive and client hang-ups', () => {
     assert.equal(res.status, 200, 'the 200 was already sent by keep-alive');
     const body = JSON.parse(await res.text());
     assert.equal(body.error.code, 410);
-    assert.equal(body.error.message, `NVIDIA NIM error 410: ${GONE.body.detail}`);
+    assert.equal(body.error.message, `NVIDIA NIM error 410 (z-ai/glm-5.3): ${GONE.body.detail}`);
     assert.equal(body.choices, undefined);
   });
 
@@ -651,7 +676,7 @@ describe('keep-alive and client hang-ups', () => {
     const chunks = parseSse(await res.text());
     assert.equal(chunks.length, 1);
     assert.equal(chunks[0].error.code, 410);
-    assert.equal(chunks[0].error.message, `NVIDIA NIM error 410: ${GONE.body.detail}`);
+    assert.equal(chunks[0].error.message, `NVIDIA NIM error 410 (z-ai/glm-5.3): ${GONE.body.detail}`);
   });
 
   it('cancels the NVIDIA request when the client hangs up while waiting', async () => {

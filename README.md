@@ -76,7 +76,7 @@ If your client still uses an old name, the proxy answers with an error that says
 The proxy only ever uses the model you asked for. If it fails, you get the error, with NVIDIA's own explanation, instead of a reply from a different model. Retries only ever go to that same model:
 
 - Rate-limited (429) or overloaded (529): up to 2 more tries, 4 seconds apart.
-- Bad gateway, briefly unavailable or timed out at NVIDIA's end (502 / 503 / 504), a dropped connection, or a non-streamed reply cut off halfway: 1 more try, but only if it failed within 30 seconds. A gateway timeout after minutes in NVIDIA's queue isn't worth waiting through twice.
+- NVIDIA's server failing, bad gateway, briefly unavailable or timed out at NVIDIA's end (500 / 502 / 503 / 504), a dropped connection, or a non-streamed reply cut off halfway: 1 more try, but only if it failed within 30 seconds. A gateway timeout after minutes in NVIDIA's queue isn't worth waiting through twice.
 
 A model name that isn't in the table above is rejected with an "Unknown model" error that lists the valid names.
 
@@ -162,11 +162,13 @@ For the `true` switches, set `false` or remove the variable to turn them off; `K
 
 | Problem | Likely Cause | Fix |
 |---|---|---|
-| "NVIDIA NIM error 401" | `NIM_API_KEY` invalid or expired | Regenerate the key at build.nvidia.com and update `NIM_API_KEY` |
+| "NVIDIA NIM error 401 (…)" | `NIM_API_KEY` invalid or expired | Regenerate the key at build.nvidia.com and update `NIM_API_KEY` |
+| "NVIDIA NIM error 404 (model): NVIDIA is not serving this model…" | NVIDIA had nothing to serve that model with your key at that moment (pulled, briefly unavailable, or not enabled for your account) | Try again a bit later or pick another model. If it never works for that model, check your build.nvidia.com account |
+| "NVIDIA NIM error 500 (model): Internal error while making inference request…" | NVIDIA's own server failed while writing the reply (the proxy already retried once) | Usually temporary: regenerate, or switch models for a while |
 | "Unknown model" / "has been renamed" / "was removed" error | Model name in your client isn't in the Model Mapping table | Use the name the error suggests, or one from the table, e.g. `glm-5.3` |
 | Very slow responses | Using `glm-5.3` / `glm-5.3-flash` (they think first) or Chinese models during peak hours | Switch to `nemotron-3.5-lightning` or `nemotron-3-ultra` |
 | "NVIDIA did not start answering within 480s" | NVIDIA's free tier is overloaded for that model (common for `deepseek-v4.1-flash` and the GLMs) | Try again later or switch models — the proxy never swaps models for you |
-| "NVIDIA NIM error 410: … reached its end of life" | NVIDIA retired that model | Pick another model; the error names the retired one |
+| "NVIDIA NIM error 410 (model): … reached its end of life" | NVIDIA retired that model | Pick another model; the error names the retired one |
 | Filter interrupts RP | Using Chinese-hosted model for mature content | Use one of the `nemotron-…` models |
 | "Forbidden: Invalid or missing authentication" (403) | The API key in your client doesn't match `CLIENT_AUTH_KEY` | Make them identical, then reload the client page |
 | "A network error occurred… NetworkError when attempting to fetch resource", only with slow models (GLM) | Render's Cloudflare edge cut a reply that hadn't started within ~100 s | Fixed by the keep-alive above; make sure `KEEPALIVE_MS` isn't `0` |
@@ -177,7 +179,7 @@ For the `true` switches, set `false` or remove the variable to turn them off; `K
 | Log line | Meaning |
 |---|---|
 | `NVIDIA did not start answering within …` | NVIDIA never started; it's overloaded |
-| `NVIDIA NIM error 504` / `503` / `502` | NVIDIA's gateway gave up or was down |
+| `NVIDIA NIM error 504` / `503` / `502` / `500` | NVIDIA's gateway gave up, was down, or its server failed |
 | `NVIDIA's reply was cut off before it finished` | NVIDIA dropped a non-streamed reply halfway |
 | `[STREAM] Upstream error` | NVIDIA went silent or dropped the connection mid-reply |
 | `Client disconnected before NVIDIA answered` / `before the reply finished` | Your client (JanitorAI) gave up or you pressed stop |
