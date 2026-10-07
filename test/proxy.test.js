@@ -36,7 +36,7 @@ async function startProxy(nimUrl, extraEnv = {}) {
     delete env[k];
   }
   for (const k of ['SHOW_REASONING', 'ENABLE_THINKING_MODE', 'SKIP_VALIDATION', 'DISCORD_WEBHOOK_URL',
-    'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT', 'REQUEST_TIMEOUT_MS', 'KEEPALIVE_MS',
+    'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT', 'REQUEST_TIMEOUT_MS', 'KEEPALIVE_MS', 'RENDER_GIT_COMMIT',
     'INSTRUCTIONS_PATH', 'INSTRUCTIONS_POSITION', 'LOREBOOK_PATH', 'LOREBOOK_SCAN_DEPTH', 'LOREBOOK_TOKEN_BUDGET']) {
     delete env[k];
   }
@@ -159,6 +159,19 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
       maxTokens: 2048 + 4096
     }
   ];
+
+  it('shows the deployed commit on /health, or "unknown" off Render', async () => {
+    const res = await fetch(`${proxy.url}/health`);
+    assert.deepEqual(await res.json(), { status: 'ok', commit: 'unknown' });
+
+    const render = await startProxy(nim.url, { RENDER_GIT_COMMIT: 'abcdef0123456789', SKIP_VALIDATION: 'true' });
+    try {
+      assert.deepEqual(await (await fetch(`${render.url}/health`)).json(), { status: 'ok', commit: 'abcdef0' });
+      assert.ok(render.logs().includes('(commit abcdef0)'), render.logs());
+    } finally {
+      await render.stop();
+    }
+  });
 
   it('lists the aliases on /v1/models without auth', async () => {
     const res = await fetch(`${proxy.url}/v1/models`);
@@ -531,17 +544,48 @@ describe('NVIDIA errors and retries', () => {
       assert.equal(error.message, `NVIDIA NIM error 410 (z-ai/glm-5.3): ${GONE.body.detail}`);
       assert.equal(nim.requests.length, 1, '410 must not be retried');
       assert.ok(proxy.logs().includes(GONE.body.detail), 'NVIDIA message missing from the log');
+      // Facts for diagnosing: what NVIDIA sent back, and how big our request was
+      assert.match(proxy.logs(), /z-ai\/glm-5\.3 failed \(attempt 1\) after [\d.]+s: 410 .*\[content-type=application\/json, (content-length=\d+, )?body=117 B, sent=[\d.]+ KB in 2 messages\]/);
+      assert.ok(!proxy.logs().includes(NIM_KEY), 'the NVIDIA key must never be logged');
     });
   }
 
-  it('names the model and explains a bare 404 that came with an empty body', async () => {
+  it('retries a quick empty 404 once, which usually rides out NVIDIA flapping', async () => {
     const { proxy, nim } = await setup({ failures: [{ status: 404, raw: '' }] });
+    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES, stream: true });
+    assert.equal(res.status, 200);
+    assert.equal(streamedContent(parseSse(await res.text())), answerFor('z-ai/glm-5.3'));
+    assert.equal(nim.requests.length, 2);
+    assert.match(proxy.logs(), /failed \(attempt 1\) after [\d.]+s: 404 Request failed with status code 404 \[content-type=application\/json, (content-length=0, )?body=0 B,/);
+  });
+
+  it('names the model and explains a bare 404 that keeps coming back', async () => {
+    const { proxy, nim } = await setup({ failures: [{ status: 404, raw: '' }, { status: 404, raw: '' }] });
     const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream: true });
     assert.equal(res.status, 404);
     const { error } = await res.json();
-    assert.match(error.message, /^NVIDIA NIM error 404 \(z-ai\/glm-5\.3-flash\): NVIDIA is not serving this model/);
+    assert.match(error.message, /^NVIDIA NIM error 404 \(z-ai\/glm-5\.3-flash\): NVIDIA had nothing to serve this model with right now/);
     assert.ok(!error.message.includes('Request failed with status code'), error.message);
-    assert.equal(nim.requests.length, 1, '404 must not be retried');
+    assert.ok(!error.message.includes('Public API Endpoints'), 'a bare 404 is not an account problem');
+    assert.equal(nim.requests.length, 2);
+  });
+
+  it("points at account access only when NVIDIA says 'Not found for account'", async () => {
+    const ACCOUNT_404 = { status: 404, body: { status: 404, title: 'Not Found', detail: "Function 'f00d': Not found for account 'acc1'" } };
+    const { proxy } = await setup({ failures: [ACCOUNT_404, ACCOUNT_404] });
+    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES });
+    assert.equal(res.status, 404);
+    const { error } = await res.json();
+    assert.ok(error.message.includes("Not found for account 'acc1'") && error.message.includes('Public API Endpoints'), error.message);
+  });
+
+  it('logs an error NVIDIA sends inside a stream that already started', async () => {
+    const { proxy } = await setup({ failures: [{ inBand: { message: 'Internal error while making inference request', code: 500 } }] });
+    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES, stream: true });
+    assert.equal(res.status, 200);
+    const chunks = parseSse(await res.text());
+    assert.equal(chunks[0].error.message, 'Internal error while making inference request');
+    await proxy.waitForLog('[PROXY] z-ai/glm-5.3 stream error: Internal error while making inference request', 2000);
   });
 
   it("retries a quick 500 once, and explains it if it happens again", async () => {

@@ -76,7 +76,7 @@ If your client still uses an old name, the proxy answers with an error that says
 The proxy only ever uses the model you asked for. If it fails, you get the error, with NVIDIA's own explanation, instead of a reply from a different model. Retries only ever go to that same model:
 
 - Rate-limited (429) or overloaded (529): up to 2 more tries, 4 seconds apart.
-- NVIDIA's server failing, bad gateway, briefly unavailable or timed out at NVIDIA's end (500 / 502 / 503 / 504), a dropped connection, or a non-streamed reply cut off halfway: 1 more try, but only if it failed within 30 seconds. A gateway timeout after minutes in NVIDIA's queue isn't worth waiting through twice.
+- The model briefly not served, NVIDIA's server failing, bad gateway, briefly unavailable or timed out at NVIDIA's end (404 / 500 / 502 / 503 / 504), a dropped connection, or a non-streamed reply cut off halfway: 1 more try, but only if it failed within 30 seconds. A gateway timeout after minutes in NVIDIA's queue isn't worth waiting through twice.
 
 A model name that isn't in the table above is rejected with an "Unknown model" error that lists the valid names.
 
@@ -131,7 +131,7 @@ You need to login to Railway with your Github. **Fork the repo before deploying.
 After you have made a deployment, you need to wait around 3 minutes for it to finish deploying. Then go into the "variables" tab, and create an env var with the name "NIM_API_KEY", and enter your NVAPI key into the variable. Next in your deployment go to the settings page, and there the networking section. Generate a public URL for your deployment. This is necessary to access it. Now your proxy is ready.
 
 ### Important Information
-You can check the status of your proxy with the "/health" endpoint, and a list of models with "/v1/models". These endpoints intentionally do not require the auth, so clients can verify connectivity before configuring auth.
+You can check the status of your proxy with the "/health" endpoint (on Render it also shows which commit is deployed), and a list of models with "/v1/models". These endpoints intentionally do not require the auth, so clients can verify connectivity before configuring auth.
 Your actual chat endpoint is in "/v1/chat/completions", and is the one you use in Janitor AI/SillyTavern or whatever platform you use.
 The client never sees your NVAPI key, which is why we don't use it as the auth, since the whole point of the auth configuration is so that your NVAPI key is not stored on your client.
 
@@ -163,7 +163,8 @@ For the `true` switches, set `false` or remove the variable to turn them off; `K
 | Problem | Likely Cause | Fix |
 |---|---|---|
 | "NVIDIA NIM error 401 (…)" | `NIM_API_KEY` invalid or expired | Regenerate the key at build.nvidia.com and update `NIM_API_KEY` |
-| "NVIDIA NIM error 404 (model): NVIDIA is not serving this model…" | NVIDIA had nothing to serve that model with your key at that moment (pulled, briefly unavailable, or not enabled for your account) | Try again a bit later or pick another model. If it never works for that model, check your build.nvidia.com account |
+| "NVIDIA NIM error 404 (model): NVIDIA had nothing to serve this model with right now…" | A short outage of that model at NVIDIA (the proxy already retried once) | Try again in a minute, or switch models for a while |
+| "NVIDIA NIM error 404 (model): … Not found for account …" | Your NVIDIA account isn't allowed to use that model | Check your build.nvidia.com account; newer models can need the "Public API Endpoints" permission |
 | "NVIDIA NIM error 500 (model): Internal error while making inference request…" | NVIDIA's own server failed while writing the reply (the proxy already retried once) | Usually temporary: regenerate, or switch models for a while |
 | "Unknown model" / "has been renamed" / "was removed" error | Model name in your client isn't in the Model Mapping table | Use the name the error suggests, or one from the table, e.g. `glm-5.3` |
 | Very slow responses | Using `glm-5.3` / `glm-5.3-flash` (they think first) or Chinese models during peak hours | Switch to `nemotron-3.5-lightning` or `nemotron-3-ultra` |
@@ -179,7 +180,9 @@ For the `true` switches, set `false` or remove the variable to turn them off; `K
 | Log line | Meaning |
 |---|---|
 | `NVIDIA did not start answering within …` | NVIDIA never started; it's overloaded |
-| `NVIDIA NIM error 504` / `503` / `502` / `500` | NVIDIA's gateway gave up, was down, or its server failed |
+| `NVIDIA NIM error 504` / `503` / `502` / `500` / `404` | NVIDIA's gateway gave up, was down, its server failed, or the model was briefly not served |
+| `<model> failed (attempt N) after Xs: … [content-type=…, body=… B, sent=… KB in … messages]` | One failed try at NVIDIA, with what NVIDIA sent back and how big the request was. Quote this line (and any request id in it) when asking NVIDIA for help |
+| `<model> stream error: …` | NVIDIA started a reply and then failed partway, inside the stream |
 | `NVIDIA's reply was cut off before it finished` | NVIDIA dropped a non-streamed reply halfway |
 | `[STREAM] Upstream error` | NVIDIA went silent or dropped the connection mid-reply |
 | `Client disconnected before NVIDIA answered` / `before the reply finished` | Your client (JanitorAI) gave up or you pressed stop |

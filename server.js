@@ -30,6 +30,9 @@ const DEEPSEEK_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.DE
   : 'high';
 
 const MAX_TOKENS_LIMIT = 65536;
+// Render sets RENDER_GIT_COMMIT on every deploy, so the log and /health show
+// which version is running
+const DEPLOYED_COMMIT = (process.env.RENDER_GIT_COMMIT || '').slice(0, 7) || 'unknown';
 
 // Milliseconds from an env var, or the fallback when it isn't a whole number in
 // range. Node timers can't hold more than 2^31-1 ms; beyond that they fire at once.
@@ -329,10 +332,14 @@ async function readStreamText(stream, maxBytes = 65536, timeoutMs = 5000) {
 
 async function describeUpstreamError(err) {
   let body = err.response?.data;
+  err.nimBodyBytes = 0;
   if (body === undefined || body === null) return err.message;
   if (typeof body.on === 'function') {
     body = await readStreamText(body);
+    err.nimBodyBytes = Buffer.byteLength(body);
     try { body = JSON.parse(body); } catch { /* plain text */ }
+  } else {
+    err.nimBodyBytes = Buffer.byteLength(typeof body === 'string' ? body : JSON.stringify(body));
   }
   if (typeof body === 'string') return body.trim().slice(0, 500) || err.message;
   // NIM answers in a few shapes: OpenAI-style, NVCF problem+json, or vLLM's
@@ -340,14 +347,33 @@ async function describeUpstreamError(err) {
   return typeof message === 'string' ? message : JSON.stringify(body).slice(0, 500);
 }
 
+// Facts about a failed NVIDIA answer, for the log: enough to tell an empty
+// error body from a lost one, and NVIDIA's request id to quote to their
+// support. Never includes the API key or any chat text.
+function failureFacts(err, requestBytes, messageCount) {
+  const raw = err.response?.headers;
+  const headers = typeof raw?.toJSON === 'function' ? raw.toJSON() : (raw || {});
+  const facts = [];
+  for (const name of ['content-type', 'content-length', 'content-encoding', 'location']) {
+    if (headers[name]) facts.push(`${name}=${headers[name]}`);
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    if (/req-?id|request-id/i.test(name)) facts.push(`${name}=${value}`);
+  }
+  if (err.response) facts.push(`body=${err.nimBodyBytes ?? 0} B`);
+  facts.push(`sent=${(requestBytes / 1024).toFixed(1)} KB in ${messageCount} messages`);
+  return `[${facts.join(', ')}]`;
+}
+
 // NVIDIA is busy: wait a moment and ask the same model again
 const RATE_LIMIT_STATUSES = [429, 529];
 const RATE_LIMIT_RETRIES = 2;
 const RATE_LIMIT_DELAY_MS = 4000;
-// A hiccup between us and the model (bad gateway, briefly unavailable, dropped
-// connection): one more try, but only when it failed quickly — a gateway
-// timeout after minutes in NVIDIA's queue is not worth waiting through twice
-const HICCUP_STATUSES = [500, 502, 503, 504];
+// A hiccup between us and the model (a model briefly not served, a backend
+// fault, bad gateway, briefly unavailable, dropped connection): one more try,
+// but only when it failed quickly — a gateway timeout after minutes in
+// NVIDIA's queue is not worth waiting through twice
+const HICCUP_STATUSES = [404, 500, 502, 503, 504];
 const HICCUP_CODES = ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'EAI_AGAIN'];
 const HICCUP_RETRIES = 1;
 const HICCUP_DELAY_MS = 2000;
@@ -365,6 +391,8 @@ const cutOffAfterHeaders = err => Boolean(err.response) && err.response.status <
 async function callModel(baseRequest, model, signal) {
   let rateLimitRetries = 0;
   let hiccupRetries = 0;
+  const requestBytes = Buffer.byteLength(JSON.stringify({ ...baseRequest, model }));
+  const messageCount = Array.isArray(baseRequest.messages) ? baseRequest.messages.length : 0;
 
   for (let attempt = 1; ; attempt++) {
     const started = Date.now();
@@ -393,7 +421,8 @@ async function callModel(baseRequest, model, signal) {
       console.warn(
         `[PROXY] ${model} failed (attempt ${attempt}) after ${(elapsed / 1000).toFixed(1)}s:`,
         status || err.code || '',
-        err.nimMessage
+        err.nimMessage,
+        failureFacts(err, requestBytes, messageCount)
       );
 
       let delay = null;
@@ -420,7 +449,7 @@ async function callModel(baseRequest, model, signal) {
 // a useful message of their own
 const STATUS_HINTS = {
   401: 'NIM_API_KEY is wrong or expired — make a new key at build.nvidia.com.',
-  404: 'NVIDIA is not serving this model to your API key right now: it may have been pulled, or newer models may need the "Public API Endpoints" permission on your build.nvidia.com account. Try another model.',
+  404: "NVIDIA had nothing to serve this model with right now. That is usually a short outage on NVIDIA's side (their own playground shows the same error): try again in a minute, or switch models for a while.",
   500: "NVIDIA's server failed while writing the reply. This is usually temporary: try again, or pick another model.",
   502: 'NVIDIA could not reach the model. Usually temporary: try again.',
   503: 'NVIDIA has no capacity for this model right now. Try again later or pick another model.',
@@ -442,7 +471,10 @@ function upstreamFailure(err) {
     const status = err.response.status;
     // axios's own "Request failed with status code N" adds nothing to the status
     const detail = err.nimMessage && !/^Request failed with status code \d+$/.test(err.nimMessage) ? err.nimMessage : '';
-    const hint = STATUS_HINTS[status] || '';
+    let hint = STATUS_HINTS[status] || '';
+    if (status === 404 && /not found for account/i.test(detail)) {
+      hint = 'Your NVIDIA account is not allowed to use this model: newer models can need the "Public API Endpoints" permission on your build.nvidia.com account.';
+    }
     const text = [detail, hint].filter(Boolean).join(' — ') || err.message;
     return { status, message: `NVIDIA NIM error ${status} (${err.nimModel}): ${text}` };
   }
@@ -452,7 +484,7 @@ function upstreamFailure(err) {
 // ─── Routes ────────────────────────────────────────────────────────────────
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: '2.1.0' });
+  res.json({ status: 'ok', commit: DEPLOYED_COMMIT });
 });
 
 app.get('/v1/models', (req, res) => {
@@ -600,6 +632,10 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         try {
           const data = JSON.parse(line.slice(6));
+          // NVIDIA can also fail inside a stream that already started with 200
+          if (data.error && !data.choices) {
+            console.warn(`[PROXY] ${nimModel} stream error:`, data.error.message || JSON.stringify(data.error).slice(0, 300));
+          }
           const delta = data.choices?.[0]?.delta;
 
           if (delta) {
@@ -819,7 +855,7 @@ app.use((err, req, res, next) => {
 // ─── Startup ───────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
-  console.log(`[PROXY] Hybrid proxy running on port ${PORT}`);
+  console.log(`[PROXY] Hybrid proxy running on port ${PORT} (commit ${DEPLOYED_COMMIT})`);
   console.log(`[PROXY] Max tokens limit: ${MAX_TOKENS_LIMIT}`);
   
   // Run validation after server starts, non-blocking
