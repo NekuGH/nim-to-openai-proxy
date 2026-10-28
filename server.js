@@ -67,7 +67,7 @@ console.log(KEEPALIVE_MS > 0
   : '[CONFIG] Keep-alive: OFF');
 if (SHOW_REASONING) console.log('[CONFIG] Reasoning display: ENABLED');
 if (ENABLE_THINKING_MODE) console.log('[CONFIG] Thinking mode: ENABLED');
-console.log(`[CONFIG] GLM-5.3 / GLM-5.3-Flash reasoning effort: ${GLM_REASONING_EFFORT}`);
+console.log(`[CONFIG] GLM-5.3-Flash reasoning effort: ${GLM_REASONING_EFFORT}`);
 console.log(ENABLE_THINKING_MODE
   ? `[CONFIG] DeepSeek-V4.1-Flash thinking: ON (effort ${DEEPSEEK_REASONING_EFFORT})`
   : '[CONFIG] DeepSeek-V4.1-Flash thinking: OFF');
@@ -93,10 +93,8 @@ const PROMPT_ADDITIONS = loadPromptAdditions();
 
 const MODEL_MAPPING = {
   'nemotron-3-ultra': 'nvidia/nemotron-3-ultra-550b-a55b',
-  'nemotron-3-super': 'nvidia/nemotron-3-super-120b-a12b',
   'nemotron-3.5-lightning': 'nvidia/nemotron-3.5-lightning-30b-a3b',
   'deepseek-v4.1-flash': 'deepseek-ai/deepseek-v4.1-flash',
-  'glm-5.3': 'z-ai/glm-5.3',
   'glm-5.3-flash': 'z-ai/glm-5.3-flash'
 };
 
@@ -104,8 +102,11 @@ const MODEL_MAPPING = {
 // switch to instead of getting a bare "Unknown model".
 const OLD_MODEL_NAMES = {
   'gpt-4': { now: 'nemotron-3-ultra' },
-  'gpt-3.5-turbo': { now: 'nemotron-3-super' },
-  'glm-5.2': { now: 'glm-5.3' },
+  // NVIDIA retired Nemotron 3 Super on 2026-10-19 and GLM-5.3 on 2026-10-27
+  'nemotron-3-super': { retired: 'nvidia/nemotron-3-super-120b-a12b', try: 'nemotron-3-ultra' },
+  'gpt-3.5-turbo': { retired: 'nvidia/nemotron-3-super-120b-a12b', try: 'nemotron-3-ultra' },
+  'glm-5.3': { retired: 'z-ai/glm-5.3', try: 'glm-5.3-flash' },
+  'glm-5.2': { retired: 'z-ai/glm-5.3', try: 'glm-5.3-flash' },
   'gpt-4o': { retired: 'deepseek-ai/deepseek-v4-pro-0813', try: 'deepseek-v4.1-flash' },
   'gpt-4-flash': { retired: 'deepseek-ai/deepseek-v4-flash', try: 'deepseek-v4.1-flash' },
   'gemini-pro': { retired: 'nvidia/llama-3.3-nemotron-super-49b-v1.5', try: 'nemotron-3.5-lightning' },
@@ -154,7 +155,6 @@ const DEEPSEEK_V41_OPTIONS = ENABLE_THINKING_MODE
   };
 
 const MODEL_OPTIONS = {
-  'z-ai/glm-5.3': GLM_OPTIONS,
   'z-ai/glm-5.3-flash': GLM_OPTIONS,
   'deepseek-ai/deepseek-v4.1-flash': DEEPSEEK_V41_OPTIONS
 };
@@ -344,7 +344,18 @@ async function describeUpstreamError(err) {
   if (typeof body === 'string') return body.trim().slice(0, 500) || err.message;
   // NIM answers in a few shapes: OpenAI-style, NVCF problem+json, or vLLM's
   const message = body?.error?.message || body?.detail || body?.message || body?.title;
-  return typeof message === 'string' ? message : JSON.stringify(body).slice(0, 500);
+  let text = typeof message === 'string' ? message : JSON.stringify(body).slice(0, 500);
+  // NVIDIA's newer structured errors keep the useful part in "details", e.g.
+  // { message: "Invalid request", details: { type: "context_length", limit, actual } }
+  const details = body?.details ?? body?.error?.details;
+  if (details && typeof details === 'object') {
+    if (details.type === 'context_length' && details.limit) {
+      text += `: the chat plus the reply budget is ${details.actual ?? 'more'} tokens, over this model's limit of ${details.limit}. Lower "Context Size" or "Max new tokens" in your client, or start a new chat`;
+    } else {
+      text += ` ${JSON.stringify(details).slice(0, 300)}`;
+    }
+  }
+  return text;
 }
 
 // Facts about a failed NVIDIA answer, for the log: enough to tell an empty
@@ -472,6 +483,9 @@ function upstreamFailure(err) {
     // axios's own "Request failed with status code N" adds nothing to the status
     const detail = err.nimMessage && !/^Request failed with status code \d+$/.test(err.nimMessage) ? err.nimMessage : '';
     let hint = STATUS_HINTS[status] || '';
+    if (/ResourceExhausted|request limit reached/i.test(detail)) {
+      hint = "NVIDIA's servers for this model are full right now (too many users). That usually clears within seconds: try again.";
+    }
     if (status === 404 && /not found for account/i.test(detail)) {
       hint = 'Your NVIDIA account is not allowed to use this model: newer models can need the "Public API Endpoints" permission on your build.nvidia.com account.';
     }

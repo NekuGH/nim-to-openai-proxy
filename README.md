@@ -27,10 +27,8 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 | Alias | Backend Model | Best For | Speed | Filters |
 |---|---|---|---|---|
 | `nemotron-3-ultra` | `nvidia/nemotron-3-ultra-550b-a55b` | Immersive RP, the most dependable model here | Fast | Low |
-| `nemotron-3-super` | `nvidia/nemotron-3-super-120b-a12b` | Lighter Nemotron. NVIDIA switched it off on Oct 3 2026 and back on a day later, so it may vanish | Fast | Low |
 | `nemotron-3.5-lightning` | `nvidia/nemotron-3.5-lightning-30b-a3b` | Smallest, quickest Nemotron, 1M context (new here, not yet tested live) | Very Fast | Low |
 | `deepseek-v4.1-flash` | `deepseek-ai/deepseek-v4.1-flash` | Fast replies, huge context, can read images (see below) | Fast | High |
-| `glm-5.3` | `z-ai/glm-5.3` | General purpose, always thinks first (see below) | Medium-Slow | Medium |
 | `glm-5.3-flash` | `z-ai/glm-5.3-flash` | Lighter, faster GLM-5.3, can read images, always thinks first | Medium | Medium |
 
 ### Renamed and removed models
@@ -40,14 +38,14 @@ If your client still uses an old name, the proxy answers with an error that says
 | Old name | Use instead | Why |
 |---|---|---|
 | `gpt-4` | `nemotron-3-ultra` | Renamed |
-| `gpt-3.5-turbo` | `nemotron-3-super` | Renamed |
-| `glm-5.2` | `glm-5.3` | Renamed (NVIDIA retired GLM-5.2) |
+| `nemotron-3-super`, `gpt-3.5-turbo` | `nemotron-3-ultra` | NVIDIA retired Nemotron 3 Super on Oct 19 2026 |
+| `glm-5.3`, `glm-5.2` | `glm-5.3-flash` | NVIDIA retired GLM-5.3 on Oct 27 2026 (and GLM-5.2 before it) |
 | `gpt-4o`, `gpt-4-flash` | `deepseek-v4.1-flash` | NVIDIA retired DeepSeek V4 Pro and V4 Flash |
 | `gemini-pro`, `gpt-3.5o` | `nemotron-3.5-lightning` | NVIDIA retired Llama-3.3-Nemotron-Super-49B and Nemotron-Mini-4B |
 
-### GLM-5.3 and GLM-5.3-Flash notes
+### GLM-5.3-Flash notes
 
-`glm-5.3` runs GLM-5.3 (it replaced GLM-5.2, which NVIDIA retired), and `glm-5.3-flash` runs GLM-5.3-Flash, a smaller and faster version that can also read images. Both always think before they reply — the models have no way to switch this off. The proxy handles it for you:
+`glm-5.3-flash` runs GLM-5.3-Flash, the faster sibling of GLM-5.3 (retired by NVIDIA on Oct 27 2026), and it can also read images. It always thinks before it replies — the model has no way to switch this off. The proxy handles it for you:
 
 - The thinking is hidden from your chat (unless `SHOW_REASONING=true`), so you only see the reply. Expect a short pause before text starts appearing.
 - Thinking length is set by `GLM_REASONING_EFFORT`. `low` (default) is fastest and fine for RP; `high` and `max` think longer and are slower.
@@ -65,9 +63,9 @@ If your client still uses an old name, the proxy answers with an error that says
 
 | If your RP involves... | Avoid | Use instead |
 |---|---|---|
-| Dark themes, violence, mature content | `deepseek-v4.1-flash` (high filters due to being based in China) | `nemotron-3-ultra`, `nemotron-3-super`, `nemotron-3.5-lightning` |
-| Fast responses needed | `glm-5.3`, `glm-5.3-flash` (they think before replying) | `nemotron-3.5-lightning`, `deepseek-v4.1-flash` |
-| Long context / memory | — | `nemotron-3-ultra`, `glm-5.3`, `deepseek-v4.1-flash` |
+| Dark themes, violence, mature content | `deepseek-v4.1-flash` (high filters due to being based in China) | `nemotron-3-ultra`, `nemotron-3.5-lightning` |
+| Fast responses needed | `glm-5.3-flash` (it thinks before replying) | `nemotron-3.5-lightning`, `deepseek-v4.1-flash` |
+| Long context / memory | — | `nemotron-3-ultra`, `glm-5.3-flash`, `deepseek-v4.1-flash` |
 | Sending images | Text-only models | `deepseek-v4.1-flash`, `glm-5.3-flash` |
 | Testing / very fast replies | — | `nemotron-3.5-lightning` |
 
@@ -145,7 +143,7 @@ After deploying, you can set these in your host's environment settings (Render: 
 | `ENABLE_THINKING_MODE` | `true` | Turns thinking on for `deepseek-v4.1-flash` |
 | `DISCORD_WEBHOOK_URL` | Webhook URL | Alerts you when models fail validation |
 | `SKIP_VALIDATION` | `true` | Disables startup model checks |
-| `GLM_REASONING_EFFORT` | `low` / `high` / `max` | How long `glm-5.3` and `glm-5.3-flash` think before replying (default `low`) |
+| `GLM_REASONING_EFFORT` | `low` / `high` / `max` | How long `glm-5.3-flash` thinks before replying (default `low`) |
 | `DEEPSEEK_REASONING_EFFORT` | `low` / `high` / `max` | How long `deepseek-v4.1-flash` thinks when `ENABLE_THINKING_MODE=true` (default `high`) |
 | `REQUEST_TIMEOUT_MS` | milliseconds | How long to wait for NVIDIA, for every model (default `480000` = 8 minutes): both for it to start answering and for the longest silence in the middle of a reply. A reply that keeps streaming is never cut off |
 | `KEEPALIVE_MS` | milliseconds | How often a waiting reply gets an invisible keep-alive (default `15000`; `0` turns it off). Keep it well under 100 s on Render |
@@ -165,9 +163,12 @@ For the `true` switches, set `false` or remove the variable to turn them off; `K
 | "NVIDIA NIM error 401 (…)" | `NIM_API_KEY` invalid or expired | Regenerate the key at build.nvidia.com and update `NIM_API_KEY` |
 | "NVIDIA NIM error 404 (model): NVIDIA had nothing to serve this model with right now…" | A short outage of that model at NVIDIA (the proxy already retried once) | Try again in a minute, or switch models for a while |
 | "NVIDIA NIM error 404 (model): … Not found for account …" | Your NVIDIA account isn't allowed to use that model | Check your build.nvidia.com account; newer models can need the "Public API Endpoints" permission |
+| "NVIDIA NIM error 400 (model): Invalid request: the chat plus the reply budget is … tokens, over this model's limit…" | The chat has grown longer than the model accepts | Lower "Context Size" or "Max new tokens" in JanitorAI, or start a new chat |
+| "… ResourceExhausted: Worker local total request limit reached …" | NVIDIA's servers for that model are full (too many users) | Usually clears within seconds: regenerate |
+| "NVIDIA NIM error 429 (model) …" | NVIDIA is rate-limiting your API key (the proxy already waited and retried twice) | Wait a few minutes; NVIDIA's free tier sometimes throttles a key for longer |
 | "NVIDIA NIM error 500 (model): Internal error while making inference request…" | NVIDIA's own server failed while writing the reply (the proxy already retried once) | Usually temporary: regenerate, or switch models for a while |
-| "Unknown model" / "has been renamed" / "was removed" error | Model name in your client isn't in the Model Mapping table | Use the name the error suggests, or one from the table, e.g. `glm-5.3` |
-| Very slow responses | Using `glm-5.3` / `glm-5.3-flash` (they think first) or Chinese models during peak hours | Switch to `nemotron-3.5-lightning` or `nemotron-3-ultra` |
+| "Unknown model" / "has been renamed" / "was removed" error | Model name in your client isn't in the Model Mapping table | Use the name the error suggests, or one from the table, e.g. `glm-5.3-flash` |
+| Very slow responses | Using `glm-5.3-flash` (it thinks first) or Chinese models during peak hours | Switch to `nemotron-3.5-lightning` or `nemotron-3-ultra` |
 | "NVIDIA did not start answering within 480s" | NVIDIA's free tier is overloaded for that model (common for `deepseek-v4.1-flash` and the GLMs) | Try again later or switch models — the proxy never swaps models for you |
 | "NVIDIA NIM error 410 (model): … reached its end of life" | NVIDIA retired that model | Pick another model; the error names the retired one |
 | Filter interrupts RP | Using Chinese-hosted model for mature content | Use one of the `nemotron-…` models |
