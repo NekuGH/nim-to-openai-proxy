@@ -18,7 +18,9 @@
 // NIM: a long wait before it answers at all, or a stream that goes quiet
 // after its first bytes. `failures` is a list of { status, body } answered,
 // in order, to the first chat requests instead of a reply ({ cutOff: true }
-// instead sends 200 and half a body, then drops the connection); `answer` replaces
+// instead sends 200 and half a body, then drops the connection, and `raw`
+// sends that exact body text, e.g. '' for an empty error, and `inBand`
+// answers 200 and then sends that error object as a stream frame); `answer` replaces
 // the reply text and `chunkSize` sets how many characters each streamed piece
 // of it carries.
 
@@ -234,6 +236,14 @@ function startMockNim({ headerDelayMs = 0, midStreamSilenceMs = 0, failures = []
           res.writeHead(200, { 'Content-Type': body.stream ? 'text/event-stream' : 'application/json' });
           res.write(body.stream ? 'data: {"choices":[{"delta":{"content":"Hal' : '{"id":"x","choices":[{"message":{"content":"Hal');
           return setTimeout(() => res.destroy(), 50);
+        }
+        if (failure?.inBand) {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          return res.end(`data: ${JSON.stringify({ error: failure.inBand })}\n\ndata: [DONE]\n\n`);
+        }
+        if (failure?.raw !== undefined) {
+          res.writeHead(failure.status, { 'Content-Type': 'application/json' });
+          return res.end(failure.raw);
         }
         if (failure) return sendJson(res, failure.status, failure.body ?? { error: { message: `mock failure ${failure.status}` } });
 

@@ -58,13 +58,10 @@ const PROFILES = {
     kwargs: undefined,
     maxTokens: REPLY_TOKENS
   },
-  'glm53-low': { model: 'z-ai/glm-5.3', kwargs: glm('low'), maxTokens: REPLY_TOKENS + HEADROOM.low },
-  'glm53-high': { model: 'z-ai/glm-5.3', kwargs: glm('high'), maxTokens: REPLY_TOKENS + HEADROOM.high },
   'glm53f-low': { model: 'z-ai/glm-5.3-flash', kwargs: glm('low'), maxTokens: REPLY_TOKENS + HEADROOM.low },
   'glm53f-high': { model: 'z-ai/glm-5.3-flash', kwargs: glm('high'), maxTokens: REPLY_TOKENS + HEADROOM.high },
   // Nemotron gets no per-model options from the proxy: the model's defaults
   'nemo-ultra': { model: 'nvidia/nemotron-3-ultra-550b-a55b', kwargs: undefined, maxTokens: REPLY_TOKENS },
-  'nemo-super': { model: 'nvidia/nemotron-3-super-120b-a12b', kwargs: undefined, maxTokens: REPLY_TOKENS },
   'nemo-light': { model: 'nvidia/nemotron-3.5-lightning-30b-a3b', kwargs: undefined, maxTokens: REPLY_TOKENS }
 };
 

@@ -36,7 +36,7 @@ async function startProxy(nimUrl, extraEnv = {}) {
     delete env[k];
   }
   for (const k of ['SHOW_REASONING', 'ENABLE_THINKING_MODE', 'SKIP_VALIDATION', 'DISCORD_WEBHOOK_URL',
-    'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT', 'REQUEST_TIMEOUT_MS', 'KEEPALIVE_MS',
+    'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT', 'REQUEST_TIMEOUT_MS', 'KEEPALIVE_MS', 'RENDER_GIT_COMMIT',
     'INSTRUCTIONS_PATH', 'INSTRUCTIONS_POSITION', 'LOREBOOK_PATH', 'LOREBOOK_SCAN_DEPTH', 'LOREBOOK_TOKEN_BUDGET']) {
     delete env[k];
   }
@@ -147,18 +147,25 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
       maxTokens: 2048
     },
     {
-      alias: 'glm-5.3',
-      nimId: 'z-ai/glm-5.3',
-      kwargs: { reasoning_effort: 'low', clear_thinking: true },
-      maxTokens: 2048 + 4096
-    },
-    {
       alias: 'glm-5.3-flash',
       nimId: 'z-ai/glm-5.3-flash',
       kwargs: { reasoning_effort: 'low', clear_thinking: true },
       maxTokens: 2048 + 4096
     }
   ];
+
+  it('shows the deployed commit on /health, or "unknown" off Render', async () => {
+    const res = await fetch(`${proxy.url}/health`);
+    assert.deepEqual(await res.json(), { status: 'ok', commit: 'unknown' });
+
+    const render = await startProxy(nim.url, { RENDER_GIT_COMMIT: 'abcdef0123456789', SKIP_VALIDATION: 'true' });
+    try {
+      assert.deepEqual(await (await fetch(`${render.url}/health`)).json(), { status: 'ok', commit: 'abcdef0' });
+      assert.ok(render.logs().includes('(commit abcdef0)'), render.logs());
+    } finally {
+      await render.stop();
+    }
+  });
 
   it('lists the aliases on /v1/models without auth', async () => {
     const res = await fetch(`${proxy.url}/v1/models`);
@@ -259,7 +266,7 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
     assert.equal(res.status, 400);
     const body = await res.json();
     assert.equal(body.error.code, 'model_not_found');
-    for (const alias of ['deepseek-v4.1-flash', 'glm-5.3', 'glm-5.3-flash']) {
+    for (const alias of ['deepseek-v4.1-flash', 'glm-5.3-flash', 'glm-5.3-flash']) {
       assert.ok(body.error.message.includes(alias), `${alias} not listed`);
     }
     assert.equal(nim.requests.length, before, 'unknown alias must not reach NIM');
@@ -268,7 +275,6 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
   it('serves the Nemotron models under their own names', async () => {
     for (const [alias, nimId] of [
       ['nemotron-3-ultra', 'nvidia/nemotron-3-ultra-550b-a55b'],
-      ['nemotron-3-super', 'nvidia/nemotron-3-super-120b-a12b'],
       ['nemotron-3.5-lightning', 'nvidia/nemotron-3.5-lightning-30b-a3b']
     ]) {
       const res = await chat(proxy, { model: alias, messages: MESSAGES });
@@ -280,13 +286,15 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
 
   it('tells clients using an old name what to switch to, without calling NIM', async () => {
     const before = nim.requests.length;
-    for (const [oldName, now] of [['gpt-4', 'nemotron-3-ultra'], ['glm-5.2', 'glm-5.3'], ['gpt-3.5-turbo', 'nemotron-3-super']]) {
+    for (const [oldName, now] of [['gpt-4', 'nemotron-3-ultra']]) {
       const res = await chat(proxy, { model: oldName, messages: MESSAGES });
       assert.equal(res.status, 400);
       assert.match((await res.json()).error.message, new RegExp(`renamed to "${now.replace('.', '\\.')}"`));
     }
     for (const [oldName, suggestion] of [['gpt-4o', 'deepseek-v4.1-flash'], ['gpt-4-flash', 'deepseek-v4.1-flash'],
-      ['gemini-pro', 'nemotron-3.5-lightning'], ['gpt-3.5o', 'nemotron-3.5-lightning']]) {
+      ['gemini-pro', 'nemotron-3.5-lightning'], ['gpt-3.5o', 'nemotron-3.5-lightning'],
+      ['nemotron-3-super', 'nemotron-3-ultra'], ['gpt-3.5-turbo', 'nemotron-3-ultra'],
+      ['glm-5.3', 'glm-5.3-flash'], ['glm-5.2', 'glm-5.3-flash']]) {
       const res = await chat(proxy, { model: oldName, messages: MESSAGES });
       assert.equal(res.status, 400);
       const message = (await res.json()).error.message;
@@ -340,7 +348,7 @@ describe('thinking on (ENABLE_THINKING_MODE, SHOW_REASONING, custom efforts)', (
 
   it('logs the effective thinking settings', () => {
     assert.ok(proxy.logs().includes('DeepSeek-V4.1-Flash thinking: ON (effort max)'));
-    assert.ok(proxy.logs().includes('GLM-5.3 / GLM-5.3-Flash reasoning effort: high'));
+    assert.ok(proxy.logs().includes('GLM-5.3-Flash reasoning effort: high'));
   });
 
   it('deepseek-v4.1-flash: turns thinking on with both switches and shows it', async () => {
@@ -362,7 +370,7 @@ describe('thinking on (ENABLE_THINKING_MODE, SHOW_REASONING, custom efforts)', (
     assert.equal(streamedContent(chunks), shownReasoning('deepseek-ai/deepseek-v4.1-flash', 'max'));
   });
 
-  for (const [alias, nimId] of [['glm-5.3', 'z-ai/glm-5.3'], ['glm-5.3-flash', 'z-ai/glm-5.3-flash']]) {
+  for (const [alias, nimId] of [['glm-5.3-flash', 'z-ai/glm-5.3-flash']]) {
     it(`${alias}: uses GLM_REASONING_EFFORT and never gets a thinking switch`, async () => {
       const res = await chat(proxy, { model: alias, messages: MESSAGES });
       assert.equal(res.status, 200);
@@ -504,7 +512,7 @@ describe('upstream timeout', () => {
 // NVCF's problem+json shape, as NIM sends for retired models
 const GONE = {
   status: 410,
-  body: { status: 410, title: 'Gone', detail: "The model 'z-ai/glm-5.3' has reached its end of life on 2026-12-01T09:00:00Z" }
+  body: { status: 410, title: 'Gone', detail: "The model 'z-ai/glm-5.3-flash' has reached its end of life on 2026-12-01T09:00:00Z" }
 };
 
 describe('NVIDIA errors and retries', () => {
@@ -525,14 +533,95 @@ describe('NVIDIA errors and retries', () => {
   for (const stream of [false, true]) {
     it(`passes NVIDIA's own error message through (${stream ? 'streaming' : 'plain'})`, async () => {
       const { proxy, nim } = await setup({ failures: [GONE] });
-      const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES, stream });
+      const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream });
       assert.equal(res.status, 410);
       const { error } = await res.json();
-      assert.equal(error.message, `NVIDIA NIM error 410: ${GONE.body.detail}`);
+      assert.equal(error.message, `NVIDIA NIM error 410 (z-ai/glm-5.3-flash): ${GONE.body.detail}`);
       assert.equal(nim.requests.length, 1, '410 must not be retried');
       assert.ok(proxy.logs().includes(GONE.body.detail), 'NVIDIA message missing from the log');
+      // Facts for diagnosing: what NVIDIA sent back, and how big our request was
+      assert.match(proxy.logs(), /z-ai\/glm-5\.3-flash failed \(attempt 1\) after [\d.]+s: 410 .*\[content-type=application\/json, (content-length=\d+, )?body=\d+ B, sent=[\d.]+ KB in 2 messages\]/);
+      assert.ok(!proxy.logs().includes(NIM_KEY), 'the NVIDIA key must never be logged');
     });
   }
+
+  it('retries a quick empty 404 once, which usually rides out NVIDIA flapping', async () => {
+    const { proxy, nim } = await setup({ failures: [{ status: 404, raw: '' }] });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream: true });
+    assert.equal(res.status, 200);
+    assert.equal(streamedContent(parseSse(await res.text())), answerFor('z-ai/glm-5.3-flash'));
+    assert.equal(nim.requests.length, 2);
+    assert.match(proxy.logs(), /failed \(attempt 1\) after [\d.]+s: 404 Request failed with status code 404 \[content-type=application\/json, (content-length=0, )?body=0 B,/);
+  });
+
+  it('names the model and explains a bare 404 that keeps coming back', async () => {
+    const { proxy, nim } = await setup({ failures: [{ status: 404, raw: '' }, { status: 404, raw: '' }] });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream: true });
+    assert.equal(res.status, 404);
+    const { error } = await res.json();
+    assert.match(error.message, /^NVIDIA NIM error 404 \(z-ai\/glm-5\.3-flash\): NVIDIA had nothing to serve this model with right now/);
+    assert.ok(!error.message.includes('Request failed with status code'), error.message);
+    assert.ok(!error.message.includes('Public API Endpoints'), 'a bare 404 is not an account problem');
+    assert.equal(nim.requests.length, 2);
+  });
+
+  it("points at account access only when NVIDIA says 'Not found for account'", async () => {
+    const ACCOUNT_404 = { status: 404, body: { status: 404, title: 'Not Found', detail: "Function 'f00d': Not found for account 'acc1'" } };
+    const { proxy } = await setup({ failures: [ACCOUNT_404, ACCOUNT_404] });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES });
+    assert.equal(res.status, 404);
+    const { error } = await res.json();
+    assert.ok(error.message.includes("Not found for account 'acc1'") && error.message.includes('Public API Endpoints'), error.message);
+  });
+
+  it("explains NVIDIA's structured 'chat too long' error", async () => {
+    const TOO_LONG = {
+      status: 400,
+      body: { message: 'Invalid request', type: 'Bad Request', code: 400, details: { type: 'context_length', limit: 262144, actual: 262323 } }
+    };
+    const { proxy, nim } = await setup({ failures: [TOO_LONG] });
+    const res = await chat(proxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES, stream: true });
+    assert.equal(res.status, 400);
+    const { error } = await res.json();
+    assert.equal(error.message,
+      'NVIDIA NIM error 400 (deepseek-ai/deepseek-v4.1-flash): Invalid request: the chat plus the reply budget is 262323 tokens, ' +
+      'over this model\'s limit of 262144. Lower "Context Size" or "Max new tokens" in your client, or start a new chat');
+    assert.equal(nim.requests.length, 1, 'a 400 is not retried');
+  });
+
+  it('says a ResourceExhausted 500 means the model is busy, not broken', async () => {
+    const BUSY = { status: 500, body: { error: { message: 'ResourceExhausted: Worker local total request limit reached (16/16)' } } };
+    const { proxy, nim } = await setup({ failures: [BUSY, BUSY] });
+    const res = await chat(proxy, { model: 'nemotron-3-ultra', messages: MESSAGES });
+    assert.equal(res.status, 500);
+    const { error } = await res.json();
+    assert.ok(error.message.includes('ResourceExhausted') && error.message.includes('full right now'), error.message);
+    assert.equal(nim.requests.length, 2, 'one quick retry first');
+  });
+
+  it('logs an error NVIDIA sends inside a stream that already started', async () => {
+    const { proxy } = await setup({ failures: [{ inBand: { message: 'Internal error while making inference request', code: 500 } }] });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream: true });
+    assert.equal(res.status, 200);
+    const chunks = parseSse(await res.text());
+    assert.equal(chunks[0].error.message, 'Internal error while making inference request');
+    await proxy.waitForLog('[PROXY] z-ai/glm-5.3-flash stream error: Internal error while making inference request', 2000);
+  });
+
+  it("retries a quick 500 once, and explains it if it happens again", async () => {
+    const INFERENCE_500 = { status: 500, body: { status: 500, title: 'Internal Server Error', detail: 'Internal error while making inference request' } };
+    const once = await setup({ failures: [INFERENCE_500] });
+    const ok = await chat(once.proxy, { model: 'glm-5.3-flash', messages: MESSAGES });
+    assert.equal(ok.status, 200);
+    assert.equal(once.nim.requests.length, 2);
+
+    const twice = await setup({ failures: [INFERENCE_500, INFERENCE_500] });
+    const bad = await chat(twice.proxy, { model: 'glm-5.3-flash', messages: MESSAGES });
+    assert.equal(bad.status, 500);
+    assert.equal((await bad.json()).error.message,
+      "NVIDIA NIM error 500 (z-ai/glm-5.3-flash): Internal error while making inference request — NVIDIA's server failed while writing the reply. This is usually temporary: try again, or pick another model.");
+    assert.equal(twice.nim.requests.length, 2);
+  });
 
   it('retries once after a quick 503 and then succeeds', async () => {
     const { proxy, nim } = await setup({ failures: [{ status: 503 }] });
@@ -552,20 +641,20 @@ describe('NVIDIA errors and retries', () => {
   it('does not retry a 503 that only came after a long wait', async () => {
     // With a 2 s timeout, "quickly" means within 0.5 s; this one takes 0.7 s
     const { proxy, nim } = await setup({ headerDelayMs: 700, failures: [{ status: 503 }] }, { REQUEST_TIMEOUT_MS: '2000' });
-    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES });
     assert.equal(res.status, 503);
     assert.equal(nim.requests.length, 1);
   });
 
   it('retries a plain reply that was cut off after it started, and reports a second cut-off as 502', async () => {
     const once = await setup({ failures: [{ cutOff: true }] });
-    const ok = await chat(once.proxy, { model: 'glm-5.3', messages: MESSAGES });
+    const ok = await chat(once.proxy, { model: 'glm-5.3-flash', messages: MESSAGES });
     assert.equal(ok.status, 200);
-    assert.equal((await ok.json()).choices[0].message.content, answerFor('z-ai/glm-5.3'));
+    assert.equal((await ok.json()).choices[0].message.content, answerFor('z-ai/glm-5.3-flash'));
     assert.equal(once.nim.requests.length, 2);
 
     const twice = await setup({ failures: [{ cutOff: true }, { cutOff: true }] });
-    const bad = await chat(twice.proxy, { model: 'glm-5.3', messages: MESSAGES });
+    const bad = await chat(twice.proxy, { model: 'glm-5.3-flash', messages: MESSAGES });
     assert.equal(bad.status, 502);
     assert.match((await bad.json()).error.message, /cut off before it finished/);
     assert.equal(twice.nim.requests.length, 2);
@@ -603,19 +692,19 @@ describe('keep-alive and client hang-ups', () => {
 
   it('pings a streaming client while NVIDIA is still queueing, then streams the reply', async () => {
     const { proxy } = await setup({ headerDelayMs: 1200 });
-    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES, stream: true });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream: true });
     assert.equal(res.status, 200);
     const text = await res.text();
 
     const pings = text.split('\n\n').filter(f => f === ': keep-alive').length;
     assert.ok(pings >= 3, `expected several pings, got ${pings}`);
     assert.ok(text.startsWith(': keep-alive'), 'the first thing sent should be a ping');
-    assert.equal(streamedContent(parseSse(text)), answerFor('z-ai/glm-5.3'));
+    assert.equal(streamedContent(parseSse(text)), answerFor('z-ai/glm-5.3-flash'));
   });
 
   it('keeps a plain (non-streaming) request alive with newlines that still parse as JSON', async () => {
     const { proxy } = await setup({ headerDelayMs: 1200 });
-    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES });
     assert.equal(res.status, 200);
     assert.match(res.headers.get('content-type'), /^application\/json/);
     const text = await res.text();
@@ -623,41 +712,41 @@ describe('keep-alive and client hang-ups', () => {
     const leading = text.match(/^\n*/)[0].length;
     assert.ok(leading >= 3, `expected several keep-alive newlines, got ${leading}`);
     const body = JSON.parse(text);
-    assert.equal(body.choices[0].message.content, answerFor('z-ai/glm-5.3'));
+    assert.equal(body.choices[0].message.content, answerFor('z-ai/glm-5.3-flash'));
     assert.equal(body.object, 'chat.completion');
   });
 
   it('answers a quick plain request normally, with no filler', async () => {
     const { proxy } = await setup({});
-    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES });
     const text = await res.text();
     assert.ok(text.startsWith('{'), JSON.stringify(text.slice(0, 20)));
   });
 
   it('reports an NVIDIA error in the JSON body once a plain reply has started', async () => {
     const { proxy } = await setup({ headerDelayMs: 700, failures: [GONE] });
-    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES });
     assert.equal(res.status, 200, 'the 200 was already sent by keep-alive');
     const body = JSON.parse(await res.text());
     assert.equal(body.error.code, 410);
-    assert.equal(body.error.message, `NVIDIA NIM error 410: ${GONE.body.detail}`);
+    assert.equal(body.error.message, `NVIDIA NIM error 410 (z-ai/glm-5.3-flash): ${GONE.body.detail}`);
     assert.equal(body.choices, undefined);
   });
 
   it('reports an NVIDIA error inside the stream once pings have started', async () => {
     const { proxy } = await setup({ headerDelayMs: 700, failures: [GONE] });
-    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES, stream: true });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream: true });
     assert.equal(res.status, 200);
     const chunks = parseSse(await res.text());
     assert.equal(chunks.length, 1);
     assert.equal(chunks[0].error.code, 410);
-    assert.equal(chunks[0].error.message, `NVIDIA NIM error 410: ${GONE.body.detail}`);
+    assert.equal(chunks[0].error.message, `NVIDIA NIM error 410 (z-ai/glm-5.3-flash): ${GONE.body.detail}`);
   });
 
   it('cancels the NVIDIA request when the client hangs up while waiting', async () => {
     const { proxy, nim } = await setup({ headerDelayMs: 3000 });
     const controller = new AbortController();
-    const pending = chat(proxy, { model: 'glm-5.3', messages: MESSAGES, stream: true }, { signal: controller.signal });
+    const pending = chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream: true }, { signal: controller.signal });
     setTimeout(() => controller.abort(), 400);
     await assert.rejects(pending.then(r => r.text()));
 
@@ -668,7 +757,7 @@ describe('keep-alive and client hang-ups', () => {
   it('stops reading from NVIDIA when the client hangs up mid-reply', async () => {
     const { proxy, nim } = await setup({ midStreamSilenceMs: 3000 });
     const controller = new AbortController();
-    const res = await chat(proxy, { model: 'glm-5.3', messages: MESSAGES, stream: true }, { signal: controller.signal });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream: true }, { signal: controller.signal });
     assert.equal(res.status, 200);
     controller.abort();
 
@@ -747,7 +836,7 @@ describe('instructions and lorebook files', () => {
 
   it('adds matching lore to the system prompt and the instructions at the end', async () => {
     const res = await chat(proxy, {
-      model: 'glm-5.3',
+      model: 'glm-5.3-flash',
       messages: [
         { role: 'system', content: 'You are Mira.' },
         { role: 'user', content: 'We walk down to the Harbor.' }
@@ -764,7 +853,7 @@ describe('instructions and lorebook files', () => {
   });
 
   it('leaves out entries whose keywords are not in the recent messages', async () => {
-    await chat(proxy, { model: 'glm-5.3', messages: [{ role: 'user', content: 'Hello there.' }] });
+    await chat(proxy, { model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'Hello there.' }] });
     const sent = nim.lastRequest().messages;
     assert.equal(sent[0].role, 'system');
     assert.equal(sent[0].content, 'LORE: magic is rare.');
