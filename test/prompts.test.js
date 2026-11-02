@@ -168,6 +168,13 @@ describe('adding lore and instructions to a request', () => {
     assert.equal(top.messages[0].content, 'You are Mira.\n\nRULES');
   });
 
+  it('puts bottom instructions before a trailing bot reply the model should continue', () => {
+    const messages = [{ role: 'system', content: 'You are Mira.' }, user('hi'), { role: 'assistant', content: 'Mira turned and' }];
+    const r = applyPromptAdditions(messages, config([], { instructions: 'RULES' }));
+    assert.deepEqual(r.messages.map(m => m.role), ['system', 'user', 'system', 'assistant']);
+    assert.equal(r.messages[2].content, 'RULES');
+  });
+
   it('appends to array (multimodal) content as an extra text part', () => {
     const messages = [{ role: 'system', content: [{ type: 'text', text: 'You are Mira.' }] }, user('harbor')];
     const r = lore([{ keys: ['harbor'], content: 'H' }], messages);

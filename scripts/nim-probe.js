@@ -62,7 +62,15 @@ const PROFILES = {
   'glm53f-high': { model: 'z-ai/glm-5.3-flash', kwargs: glm('high'), maxTokens: REPLY_TOKENS + HEADROOM.high },
   // Nemotron gets no per-model options from the proxy: the model's defaults
   'nemo-ultra': { model: 'nvidia/nemotron-3-ultra-550b-a55b', kwargs: undefined, maxTokens: REPLY_TOKENS },
-  'nemo-light': { model: 'nvidia/nemotron-3.5-lightning-30b-a3b', kwargs: undefined, maxTokens: REPLY_TOKENS }
+  'nemo-light': { model: 'nvidia/nemotron-3.5-lightning-30b-a3b', kwargs: undefined, maxTokens: REPLY_TOKENS },
+  'super-vl': {
+    model: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
+    kwargs: { enable_thinking: true, reasoning_budget: 4096 },
+    maxTokens: REPLY_TOKENS + 4096
+  },
+  'minimax-low': { model: 'minimaxai/minimax-m3.1-flash', kwargs: { reasoning_effort: 'low' }, maxTokens: REPLY_TOKENS + HEADROOM.low },
+  // Mistral takes its effort as a top-level field, not in chat_template_kwargs
+  'mistral-low': { model: 'mistralai/mistral-large-4-1t-a52b', fields: { reasoning_effort: 'low' }, maxTokens: REPLY_TOKENS + HEADROOM.low }
 };
 
 const profileNames = list(process.env.PROFILES, Object.keys(PROFILES));
@@ -148,7 +156,8 @@ async function probeOnce(profileName, size, mode) {
     max_tokens: profile.maxTokens,
     stream,
     ...(stream ? { stream_options: { include_usage: true } } : {}),
-    ...(profile.kwargs ? { chat_template_kwargs: profile.kwargs } : {})
+    ...(profile.kwargs ? { chat_template_kwargs: profile.kwargs } : {}),
+    ...profile.fields
   };
 
   const result = {

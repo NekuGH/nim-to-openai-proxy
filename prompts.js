@@ -292,8 +292,14 @@ function applyPromptAdditions(messages, config) {
         out = [{ role: 'system', content: config.instructions }, ...out];
       }
     } else {
-      // After the whole chat, where models follow it most closely
-      out = [...out, { role: 'system', content: config.instructions }];
+      // After the whole chat, where models follow it most closely. If the chat
+      // ends with a reply the model should continue, the rules go just before
+      // that reply so it stays last (some templates reject a system message
+      // right after an assistant one, and the continuation must be last).
+      const note = { role: 'system', content: config.instructions };
+      let at = out.length;
+      while (at > 0 && out[at - 1]?.role === 'assistant') at--;
+      out = at === 0 ? [...out, note] : [...out.slice(0, at), note, ...out.slice(at)];
     }
     result.instructions = true;
   }
