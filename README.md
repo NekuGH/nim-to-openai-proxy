@@ -66,7 +66,7 @@ If your client still uses an old name, the proxy answers with an error that says
 
 All three think before they answer. As with GLM, the thinking is hidden unless `SHOW_REASONING=true`, and the proxy adds extra token room on top of your max tokens so the thinking can't eat the reply.
 
-- **`nemotron-3.5-super-vl`** thinks by default, and on NVIDIA it can think for a very long time (11–16K tokens on a test task). Its usual effort switches are ignored there, so the proxy caps the thinking with a budget instead: `SUPER_VL_THINKING_BUDGET` (default `4096` tokens, which is also the extra room added; `0` turns thinking off for the fastest replies).
+- **`nemotron-3.5-super-vl`** is set up to be as smart as it can be: full thinking with no cap (its most accurate mode; it can think for 11–16K tokens on hard prompts), 32K tokens of room for that thinking on top of the reply, and NVIDIA's recommended `top_p` of 0.95. NVIDIA also recommends **temperature 1.0** for text, so set that in JanitorAI when you use this model. Full thinking is slower; `SUPER_VL_THINKING_BUDGET` can cap it (e.g. `8192` tokens) or turn it off (`0`) for faster replies.
 - **`minimax-m3.1-flash`** decides by itself whether a turn needs thinking. `MINIMAX_REASONING_EFFORT` (`low` / `medium` / `high` / `xhigh` / `max`, default `low`) sets how hard it thinks when it does. Its context is 262,144 tokens, smaller than the others; a chat that outgrows it gets a clear "chat too long" error.
 - **`mistral-large-4`** always thinks; `MISTRAL_REASONING_EFFORT` (`low` / `medium` / `high`, default `low`) sets how long. Without a setting the model would pick `high`, the slowest. Its chat format is strict, so the proxy quietly fits the messages to it: a system message right after a bot message becomes a "[System note]" from your side, empty bot messages are dropped, and a chat that ends with a bot message is continued instead of rejected.
 
@@ -158,7 +158,8 @@ After deploying, you can set these in your host's environment settings (Render: 
 | `DEEPSEEK_REASONING_EFFORT` | `low` / `high` / `max` | How long `deepseek-v4.1-flash` thinks when `ENABLE_THINKING_MODE=true` (default `high`) |
 | `MINIMAX_REASONING_EFFORT` | `low` / `medium` / `high` / `xhigh` / `max` | How hard `minimax-m3.1-flash` thinks (default `low`) |
 | `MISTRAL_REASONING_EFFORT` | `low` / `medium` / `high` | How long `mistral-large-4` thinks (default `low`) |
-| `SUPER_VL_THINKING_BUDGET` | tokens | The most `nemotron-3.5-super-vl` may think (default `4096`; `0` = no thinking) |
+| `SUPER_VL_THINKING_BUDGET` | tokens | Cap on how long `nemotron-3.5-super-vl` thinks (default: no cap, full thinking; `0` = no thinking) |
+| `DEFAULT_MAX_TOKENS` | tokens | The reply ceiling when your client sets no max tokens, or 0 ("unlimited" in JanitorAI). The model still stops when it's done; this only stops a runaway reply (default `8192`) |
 | `REQUEST_TIMEOUT_MS` | milliseconds | How long to wait for NVIDIA, for every model (default `480000` = 8 minutes): both for it to start answering and for the longest silence in the middle of a reply. A reply that keeps streaming is never cut off |
 | `KEEPALIVE_MS` | milliseconds | How often a waiting reply gets an invisible keep-alive (default `15000`; `0` turns it off). Keep it well under 100 s on Render |
 | `INSTRUCTIONS_POSITION` | `bottom` / `top` | Where the instructions go: after the chat (default) or in the system prompt |
