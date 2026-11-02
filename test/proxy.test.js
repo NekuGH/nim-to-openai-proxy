@@ -37,7 +37,7 @@ async function startProxy(nimUrl, extraEnv = {}) {
   }
   for (const k of ['SHOW_REASONING', 'ENABLE_THINKING_MODE', 'SKIP_VALIDATION', 'DISCORD_WEBHOOK_URL',
     'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT', 'REQUEST_TIMEOUT_MS', 'KEEPALIVE_MS', 'RENDER_GIT_COMMIT',
-    'MINIMAX_REASONING_EFFORT', 'MISTRAL_REASONING_EFFORT', 'SUPER_VL_THINKING_BUDGET',
+    'MINIMAX_REASONING_EFFORT', 'MISTRAL_REASONING_EFFORT', 'SUPER_VL_THINKING_BUDGET', 'DEFAULT_MAX_TOKENS',
     'INSTRUCTIONS_PATH', 'INSTRUCTIONS_POSITION', 'LOREBOOK_PATH', 'LOREBOOK_SCAN_DEPTH', 'LOREBOOK_TOKEN_BUDGET']) {
     delete env[k];
   }
@@ -145,32 +145,34 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
       alias: 'deepseek-v4.1-flash',
       nimId: 'deepseek-ai/deepseek-v4.1-flash',
       kwargs: { thinking: false, enable_thinking: false },
-      maxTokens: 2048
+      maxTokens: 8192
     },
     {
       alias: 'glm-5.3-flash',
       nimId: 'z-ai/glm-5.3-flash',
       kwargs: { reasoning_effort: 'low', clear_thinking: true },
-      maxTokens: 2048 + 4096
+      maxTokens: 8192 + 4096
     },
     {
       alias: 'nemotron-3.5-super-vl',
       nimId: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
-      kwargs: { enable_thinking: true, reasoning_budget: 4096 },
-      maxTokens: 2048 + 4096
+      // Full thinking by default, with room for it, and NVIDIA's top_p
+      kwargs: { enable_thinking: true },
+      fields: { top_p: 0.95 },
+      maxTokens: 8192 + 32768
     },
     {
       alias: 'minimax-m3.1-flash',
       nimId: 'minimaxai/minimax-m3.1-flash',
       kwargs: { reasoning_effort: 'low' },
-      maxTokens: 2048 + 4096
+      maxTokens: 8192 + 4096
     },
     {
       alias: 'mistral-large-4',
       nimId: 'mistralai/mistral-large-4-1t-a52b',
       kwargs: undefined,
       fields: { reasoning_effort: 'low' },
-      maxTokens: 2048 + 4096
+      maxTokens: 8192 + 4096
     }
   ];
 
@@ -223,6 +225,7 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
       assert.equal(sent.model, nimId);
       assert.deepEqual(sent.chat_template_kwargs, kwargs);
       assert.equal(sent.reasoning_effort, fields.reasoning_effort, 'top-level reasoning_effort only where the model needs it');
+      assert.equal(sent.top_p, fields.top_p, 'top_p only where the proxy sets one');
       assert.equal(sent.max_tokens, maxTokens);
       assert.equal(sent.stream, false);
       assert.equal(sent.temperature, 0.7);
@@ -380,7 +383,7 @@ describe('thinking on (ENABLE_THINKING_MODE, SHOW_REASONING, custom efforts)', (
 
     const sent = nim.lastRequest();
     assert.deepEqual(sent.chat_template_kwargs, { thinking: true, enable_thinking: true, reasoning_effort: 'max' });
-    assert.equal(sent.max_tokens, 2048 + 16384);
+    assert.equal(sent.max_tokens, 8192 + 16384);
     assert.ok(!('extra_body' in sent), 'extra_body must not be sent');
   });
 
@@ -400,7 +403,7 @@ describe('thinking on (ENABLE_THINKING_MODE, SHOW_REASONING, custom efforts)', (
 
       const sent = nim.lastRequest();
       assert.deepEqual(sent.chat_template_kwargs, { reasoning_effort: 'high', clear_thinking: true });
-      assert.equal(sent.max_tokens, 2048 + 8192);
+      assert.equal(sent.max_tokens, 8192 + 8192);
       assert.ok(!('extra_body' in sent), 'extra_body must not be sent');
     });
 
@@ -987,13 +990,22 @@ describe('settings for Super VL, MiniMax and Mistral', () => {
     assert.equal(res.status, 200);
     assert.deepEqual(nim.lastRequest().chat_template_kwargs, { enable_thinking: false });
     assert.equal(nim.lastRequest().max_tokens, 500);
+    assert.equal(nim.lastRequest().top_p, 0.95);
+  });
+
+  it('caps Super VL thinking when SUPER_VL_THINKING_BUDGET is a number', async () => {
+    const { proxy, nim } = await setup({ SUPER_VL_THINKING_BUDGET: '8192' });
+    assert.ok(proxy.logs().includes('Nemotron-3.5-Super-VL thinking: up to 8192 tokens'), proxy.logs());
+    await chat(proxy, { model: 'nemotron-3.5-super-vl', messages: MESSAGES, max_tokens: 700 });
+    assert.deepEqual(nim.lastRequest().chat_template_kwargs, { enable_thinking: true, reasoning_budget: 8192 });
+    assert.equal(nim.lastRequest().max_tokens, 700 + 8192);
   });
 
   it('falls back to safe defaults for values the models would reject', async () => {
     // "max" is a 400 on hosted Mistral Large 4; a budget must be a whole token count
     const { proxy, nim } = await setup({ MISTRAL_REASONING_EFFORT: 'max', MINIMAX_REASONING_EFFORT: 'ultra', SUPER_VL_THINKING_BUDGET: 'lots' });
     assert.ok(proxy.logs().includes('Ignoring SUPER_VL_THINKING_BUDGET=lots'), proxy.logs());
-    assert.ok(proxy.logs().includes('Nemotron-3.5-Super-VL thinking: up to 4096 tokens'), proxy.logs());
+    assert.ok(proxy.logs().includes('Nemotron-3.5-Super-VL thinking: full (no cap)'), proxy.logs());
 
     const res = await chat(proxy, { model: 'mistral-large-4', messages: MESSAGES });
     assert.equal(res.status, 200);
@@ -1001,5 +1013,52 @@ describe('settings for Super VL, MiniMax and Mistral', () => {
 
     await chat(proxy, { model: 'minimax-m3.1-flash', messages: MESSAGES });
     assert.deepEqual(nim.lastRequest().chat_template_kwargs, { reasoning_effort: 'low' });
+  });
+});
+
+// ─── "Max new tokens: 0" ───────────────────────────────────────────────────
+
+describe('a client that sets no max tokens', () => {
+  const started = [];
+  after(async () => {
+    for (const { proxy, nim } of started) {
+      await proxy.stop();
+      await nim.close();
+    }
+  });
+  const setup = async env => {
+    const nim = await startMockNim();
+    const proxy = await startProxy(nim.url, { SKIP_VALIDATION: 'true', ...env });
+    started.push({ proxy, nim });
+    return { proxy, nim };
+  };
+
+  it('treats 0, null, nothing or junk as "no limit": an 8192-token reply ceiling plus thinking room', async () => {
+    const { proxy, nim } = await setup({});
+    assert.ok(proxy.logs().includes('Reply ceiling when the client sets no max tokens: 8192'), proxy.logs());
+    for (const max_tokens of [0, null, undefined, -5, 'lots']) {
+      const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, max_tokens });
+      assert.equal(res.status, 200);
+      assert.equal(nim.lastRequest().max_tokens, 8192 + 4096, `max_tokens=${max_tokens}`);
+    }
+    await chat(proxy, { model: 'nemotron-3-ultra', messages: MESSAGES, max_tokens: 0 });
+    assert.equal(nim.lastRequest().max_tokens, 8192, 'never a literal 0 to NVIDIA');
+  });
+
+  it('reads a number sent as text', async () => {
+    const { proxy, nim } = await setup({});
+    await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, max_tokens: '600' });
+    assert.equal(nim.lastRequest().max_tokens, 600 + 4096);
+  });
+
+  it('uses DEFAULT_MAX_TOKENS when set, and ignores a 0 there', async () => {
+    const custom = await setup({ DEFAULT_MAX_TOKENS: '3000' });
+    await chat(custom.proxy, { model: 'nemotron-3-ultra', messages: MESSAGES, max_tokens: 0 });
+    assert.equal(custom.nim.lastRequest().max_tokens, 3000);
+
+    const zero = await setup({ DEFAULT_MAX_TOKENS: '0' });
+    assert.ok(zero.proxy.logs().includes('Ignoring DEFAULT_MAX_TOKENS=0'), zero.proxy.logs());
+    await chat(zero.proxy, { model: 'nemotron-3-ultra', messages: MESSAGES });
+    assert.equal(zero.nim.lastRequest().max_tokens, 8192);
   });
 });
