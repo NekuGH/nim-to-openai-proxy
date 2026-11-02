@@ -12,7 +12,7 @@ const axios = require('axios');
 const PROXY_URL = (process.env.PROXY_URL || 'http://localhost:3000').replace(/\/+$/, '');
 const CLIENT_AUTH_KEY = process.env.CLIENT_AUTH_KEY;
 const MODELS = (process.env.MODELS ||
-  'nemotron-3-ultra,nemotron-3.5-lightning,deepseek-v4.1-flash,glm-5.3-flash')
+  'nemotron-3-ultra,nemotron-3.5-lightning,nemotron-3.5-super-vl,deepseek-v4.1-flash,glm-5.3-flash,minimax-m3.1-flash,mistral-large-4')
   .split(',')
   .map(m => m.trim())
   .filter(Boolean);

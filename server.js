@@ -28,6 +28,12 @@ const GLM_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.GLM_REA
 const DEEPSEEK_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.DEEPSEEK_REASONING_EFFORT)
   ? process.env.DEEPSEEK_REASONING_EFFORT
   : 'high';
+const MINIMAX_REASONING_EFFORT = ['low', 'medium', 'high', 'xhigh', 'max'].includes(process.env.MINIMAX_REASONING_EFFORT)
+  ? process.env.MINIMAX_REASONING_EFFORT
+  : 'low';
+const MISTRAL_REASONING_EFFORT = ['low', 'medium', 'high'].includes(process.env.MISTRAL_REASONING_EFFORT)
+  ? process.env.MISTRAL_REASONING_EFFORT
+  : 'low';
 
 const MAX_TOKENS_LIMIT = 65536;
 // Render sets RENDER_GIT_COMMIT on every deploy, so the log and /health show
@@ -46,10 +52,23 @@ function envMs(name, fallback, { allowZero = false } = {}) {
   return fallback;
 }
 
+// A token count from an env var: a whole number from 0 up to the max_tokens
+// cap, or the fallback (with a warning) when it isn't one
+function envTokens(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= 0 && n <= MAX_TOKENS_LIMIT) return n;
+  console.warn(`[CONFIG] Ignoring ${name}=${raw}: expected a whole number of tokens from 0 to ${MAX_TOKENS_LIMIT}`);
+  return fallback;
+}
+
 // How long to wait on NIM, for every model: both for it to start answering and
 // for the longest silence mid-stream (a stream that keeps sending has no cap).
 // NVIDIA's free tier is often overloaded and can queue a request for minutes.
 const REQUEST_TIMEOUT_MS = envMs('REQUEST_TIMEOUT_MS', 480000);
+// How many tokens Nemotron 3.5 Super VL may think for (0 = no thinking)
+const SUPER_VL_THINKING_BUDGET = envTokens('SUPER_VL_THINKING_BUDGET', 4096);
 const VALIDATION_TIMEOUT_MS = 15000;
 const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
 // While NVIDIA queues a request the client hears nothing, and whatever sits in
@@ -71,6 +90,11 @@ console.log(`[CONFIG] GLM-5.3-Flash reasoning effort: ${GLM_REASONING_EFFORT}`);
 console.log(ENABLE_THINKING_MODE
   ? `[CONFIG] DeepSeek-V4.1-Flash thinking: ON (effort ${DEEPSEEK_REASONING_EFFORT})`
   : '[CONFIG] DeepSeek-V4.1-Flash thinking: OFF');
+console.log(`[CONFIG] MiniMax-M3.1-Flash reasoning effort: ${MINIMAX_REASONING_EFFORT}`);
+console.log(`[CONFIG] Mistral-Large-4 reasoning effort: ${MISTRAL_REASONING_EFFORT}`);
+console.log(SUPER_VL_THINKING_BUDGET > 0
+  ? `[CONFIG] Nemotron-3.5-Super-VL thinking: up to ${SUPER_VL_THINKING_BUDGET} tokens`
+  : '[CONFIG] Nemotron-3.5-Super-VL thinking: OFF');
 
 // ─── Config validation ──────────────────────────────────────────────────────
 
@@ -94,8 +118,11 @@ const PROMPT_ADDITIONS = loadPromptAdditions();
 const MODEL_MAPPING = {
   'nemotron-3-ultra': 'nvidia/nemotron-3-ultra-550b-a55b',
   'nemotron-3.5-lightning': 'nvidia/nemotron-3.5-lightning-30b-a3b',
+  'nemotron-3.5-super-vl': 'nvidia/nemotron-3.5-super-vl-120b-a12b',
   'deepseek-v4.1-flash': 'deepseek-ai/deepseek-v4.1-flash',
-  'glm-5.3-flash': 'z-ai/glm-5.3-flash'
+  'glm-5.3-flash': 'z-ai/glm-5.3-flash',
+  'minimax-m3.1-flash': 'minimaxai/minimax-m3.1-flash',
+  'mistral-large-4': 'mistralai/mistral-large-4-1t-a52b'
 };
 
 // Names this proxy used to accept. A client still sending one is told what to
@@ -116,7 +143,7 @@ const OLD_MODEL_NAMES = {
 // ─── Per-model request options ─────────────────────────────────────────────
 
 // Thinking counts against max_tokens, so extra room is added for it.
-const REASONING_TOKENS = { low: 4096, high: 8192, max: 16384 };
+const REASONING_TOKENS = { low: 4096, medium: 8192, high: 8192, xhigh: 16384, max: 16384 };
 
 // GLM-5.3 and GLM-5.3-Flash share a chat template that always thinks before
 // answering; it has no off switch. Never send enable_thinking: false to them —
@@ -154,7 +181,71 @@ const DEEPSEEK_V41_OPTIONS = ENABLE_THINKING_MODE
     }
   };
 
+// Mistral Large 4's chat template refuses (HTTP 400) a system message right
+// after an assistant one, an empty assistant message, and, on hosted NIM, a
+// chat that ends with an assistant message unless it is marked as a reply to
+// continue. Rather than fail a whole roleplay turn, the messages are bent to
+// fit: such a system message becomes a user-side note, empty assistant
+// messages are dropped, and a trailing assistant message is continued.
+function fitMistralTemplate(messages) {
+  const fields = {};
+  if (!Array.isArray(messages)) return { messages, fields };
+
+  const out = [];
+  for (const message of messages) {
+    if (message?.role === 'assistant' && !message.tool_calls?.length) {
+      const empty = message.content == null || message.content === '' ||
+        (Array.isArray(message.content) && message.content.length === 0);
+      if (empty) continue;
+    }
+    if (message?.role === 'system' && out.length > 0 && out[out.length - 1].role === 'assistant') {
+      const text = typeof message.content === 'string' ? message.content : JSON.stringify(message.content);
+      out.push({ role: 'user', content: `[System note]\n${text}` });
+      continue;
+    }
+    out.push(message);
+  }
+
+  if (out.length > 0 && out[out.length - 1].role === 'assistant') {
+    fields.continue_final_message = true;
+    fields.add_generation_prompt = false;
+  }
+  return { messages: out, fields };
+}
+
+// Nemotron 3.5 Super VL thinks by default, and long (11-16K tokens on a test
+// task on hosted NIM). Its effort switches are ignored there; only
+// reasoning_budget caps the thinking, cutting it off and answering right away.
+// SUPER_VL_THINKING_BUDGET (set near the top) is that cap.
+const SUPER_VL_OPTIONS = SUPER_VL_THINKING_BUDGET > 0
+  ? {
+    chat_template_kwargs: { enable_thinking: true, reasoning_budget: SUPER_VL_THINKING_BUDGET },
+    reasoningTokens: SUPER_VL_THINKING_BUDGET
+  }
+  : { chat_template_kwargs: { enable_thinking: false } };
+
+// MiniMax M3.1 Flash always thinks adaptively (it may skip easy turns), and
+// NIM keeps the thinking out of the reply. Effort goes in chat_template_kwargs.
+const MINIMAX_OPTIONS = {
+  chat_template_kwargs: { reasoning_effort: MINIMAX_REASONING_EFFORT },
+  reasoningTokens: REASONING_TOKENS[MINIMAX_REASONING_EFFORT]
+};
+
+// Mistral Large 4 always thinks. On hosted NIM only a top-level
+// reasoning_effort of low/medium/high works (anything else is a 400, and
+// chat_template_kwargs thinking switches are ignored); without one the
+// template picks the slowest, high. Its template is also strict about message
+// order, which fitMistralTemplate() takes care of.
+const MISTRAL_OPTIONS = {
+  requestFields: { reasoning_effort: MISTRAL_REASONING_EFFORT },
+  reasoningTokens: REASONING_TOKENS[MISTRAL_REASONING_EFFORT],
+  fitMessages: fitMistralTemplate
+};
+
 const MODEL_OPTIONS = {
+  'nvidia/nemotron-3.5-super-vl-120b-a12b': SUPER_VL_OPTIONS,
+  'minimaxai/minimax-m3.1-flash': MINIMAX_OPTIONS,
+  'mistralai/mistral-large-4-1t-a52b': MISTRAL_OPTIONS,
   'z-ai/glm-5.3-flash': GLM_OPTIONS,
   'deepseek-ai/deepseek-v4.1-flash': DEEPSEEK_V41_OPTIONS
 };
@@ -587,12 +678,18 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (added.lore.length > 0) console.log(`[LORE] Added ${added.lore.length}: ${added.lore.join(', ')}`);
     if (added.dropped.length > 0) console.log(`[LORE] Over the token budget, left out: ${added.dropped.join(', ')}`);
 
+    const fitted = modelOptions.fitMessages
+      ? modelOptions.fitMessages(added.messages)
+      : { messages: added.messages, fields: {} };
+
     const baseRequest = {
-      messages: added.messages,
+      messages: fitted.messages,
       temperature: temperature ?? 0.7,
       max_tokens: Math.min((max_tokens ?? 2048) + (modelOptions.reasoningTokens || 0), MAX_TOKENS_LIMIT),
       stream: stream || false,
-      chat_template_kwargs: modelOptions.chat_template_kwargs
+      chat_template_kwargs: modelOptions.chat_template_kwargs,
+      ...modelOptions.requestFields,
+      ...fitted.fields
     };
 
     if (KEEPALIVE_MS > 0) {

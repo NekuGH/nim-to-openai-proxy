@@ -37,6 +37,7 @@ async function startProxy(nimUrl, extraEnv = {}) {
   }
   for (const k of ['SHOW_REASONING', 'ENABLE_THINKING_MODE', 'SKIP_VALIDATION', 'DISCORD_WEBHOOK_URL',
     'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT', 'REQUEST_TIMEOUT_MS', 'KEEPALIVE_MS', 'RENDER_GIT_COMMIT',
+    'MINIMAX_REASONING_EFFORT', 'MISTRAL_REASONING_EFFORT', 'SUPER_VL_THINKING_BUDGET',
     'INSTRUCTIONS_PATH', 'INSTRUCTIONS_POSITION', 'LOREBOOK_PATH', 'LOREBOOK_SCAN_DEPTH', 'LOREBOOK_TOKEN_BUDGET']) {
     delete env[k];
   }
@@ -151,6 +152,25 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
       nimId: 'z-ai/glm-5.3-flash',
       kwargs: { reasoning_effort: 'low', clear_thinking: true },
       maxTokens: 2048 + 4096
+    },
+    {
+      alias: 'nemotron-3.5-super-vl',
+      nimId: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
+      kwargs: { enable_thinking: true, reasoning_budget: 4096 },
+      maxTokens: 2048 + 4096
+    },
+    {
+      alias: 'minimax-m3.1-flash',
+      nimId: 'minimaxai/minimax-m3.1-flash',
+      kwargs: { reasoning_effort: 'low' },
+      maxTokens: 2048 + 4096
+    },
+    {
+      alias: 'mistral-large-4',
+      nimId: 'mistralai/mistral-large-4-1t-a52b',
+      kwargs: undefined,
+      fields: { reasoning_effort: 'low' },
+      maxTokens: 2048 + 4096
     }
   ];
 
@@ -185,7 +205,7 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
     }
   });
 
-  for (const { alias, nimId, kwargs, maxTokens } of CASES) {
+  for (const { alias, nimId, kwargs, fields = {}, maxTokens } of CASES) {
     it(`${alias}: non-streaming reply is clean and the upstream request is right`, async () => {
       const res = await chat(proxy, { model: alias, messages: MESSAGES });
       assert.equal(res.status, 200);
@@ -202,6 +222,7 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
       const sent = nim.lastRequest();
       assert.equal(sent.model, nimId);
       assert.deepEqual(sent.chat_template_kwargs, kwargs);
+      assert.equal(sent.reasoning_effort, fields.reasoning_effort, 'top-level reasoning_effort only where the model needs it');
       assert.equal(sent.max_tokens, maxTokens);
       assert.equal(sent.stream, false);
       assert.equal(sent.temperature, 0.7);
@@ -870,3 +891,115 @@ async function waitFor(check, message, timeoutMs = 2000) {
     await new Promise(r => setTimeout(r, 20));
   }
 }
+
+// ─── Mistral Large 4's strict template ─────────────────────────────────────
+
+describe("mistral-large-4: messages are fitted to its strict template", () => {
+  let nim;
+  let proxy;
+
+  before(async () => {
+    nim = await startMockNim();
+    proxy = await startProxy(nim.url, { SKIP_VALIDATION: 'true' });
+  });
+  after(async () => {
+    await proxy?.stop();
+    await nim?.close();
+  });
+
+  it('turns a system message after a bot message into a note, and drops empty bot messages', async () => {
+    const messages = [
+      { role: 'system', content: 'You are Mira.' },
+      { role: 'assistant', content: 'Mira looks up from her ledger.' },
+      { role: 'system', content: 'Memory: the bells rang last night.' },
+      { role: 'user', content: 'What happened?' },
+      { role: 'assistant', content: '' },
+      { role: 'user', content: 'Hello?' }
+    ];
+    const res = await chat(proxy, { model: 'mistral-large-4', messages });
+    assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+    assert.equal((await res.json()).choices[0].message.content, answerFor('mistralai/mistral-large-4-1t-a52b'));
+
+    assert.deepEqual(nim.lastRequest().messages, [
+      { role: 'system', content: 'You are Mira.' },
+      { role: 'assistant', content: 'Mira looks up from her ledger.' },
+      { role: 'user', content: '[System note]\nMemory: the bells rang last night.' },
+      { role: 'user', content: 'What happened?' },
+      { role: 'user', content: 'Hello?' }
+    ]);
+    assert.equal(nim.lastRequest().continue_final_message, undefined);
+  });
+
+  it('continues a chat that ends with a bot message instead of failing', async () => {
+    const messages = [...MESSAGES, { role: 'assistant', content: 'Mira opened the door and' }];
+    const res = await chat(proxy, { model: 'mistral-large-4', messages, stream: true });
+    assert.equal(res.status, 200);
+    assert.equal(streamedContent(parseSse(await res.text())), answerFor('mistralai/mistral-large-4-1t-a52b'));
+    const sent = nim.lastRequest();
+    assert.equal(sent.continue_final_message, true);
+    assert.equal(sent.add_generation_prompt, false);
+  });
+
+  it('leaves other models\' messages exactly as the client sent them', async () => {
+    const messages = [
+      { role: 'system', content: 'You are Mira.' },
+      { role: 'assistant', content: '' },
+      { role: 'system', content: 'Memory.' },
+      { role: 'user', content: 'Hi' }
+    ];
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages });
+    assert.equal(res.status, 200);
+    assert.deepEqual(nim.lastRequest().messages, messages);
+    assert.equal(nim.lastRequest().continue_final_message, undefined);
+  });
+});
+
+// ─── Settings for the new models ───────────────────────────────────────────
+
+describe('settings for Super VL, MiniMax and Mistral', () => {
+  const started = [];
+  after(async () => {
+    for (const { proxy, nim } of started) {
+      await proxy.stop();
+      await nim.close();
+    }
+  });
+  const setup = async env => {
+    const nim = await startMockNim();
+    const proxy = await startProxy(nim.url, { SKIP_VALIDATION: 'true', ...env });
+    started.push({ proxy, nim });
+    return { proxy, nim };
+  };
+
+  it('honours MINIMAX_REASONING_EFFORT, MISTRAL_REASONING_EFFORT and SUPER_VL_THINKING_BUDGET=0', async () => {
+    const { proxy, nim } = await setup({ MINIMAX_REASONING_EFFORT: 'max', MISTRAL_REASONING_EFFORT: 'medium', SUPER_VL_THINKING_BUDGET: '0' });
+    assert.ok(proxy.logs().includes('Nemotron-3.5-Super-VL thinking: OFF'), proxy.logs());
+
+    await chat(proxy, { model: 'minimax-m3.1-flash', messages: MESSAGES, max_tokens: 500 });
+    assert.deepEqual(nim.lastRequest().chat_template_kwargs, { reasoning_effort: 'max' });
+    assert.equal(nim.lastRequest().max_tokens, 500 + 16384);
+
+    await chat(proxy, { model: 'mistral-large-4', messages: MESSAGES, max_tokens: 500 });
+    assert.equal(nim.lastRequest().reasoning_effort, 'medium');
+    assert.equal(nim.lastRequest().max_tokens, 500 + 8192);
+
+    const res = await chat(proxy, { model: 'nemotron-3.5-super-vl', messages: MESSAGES, max_tokens: 500 });
+    assert.equal(res.status, 200);
+    assert.deepEqual(nim.lastRequest().chat_template_kwargs, { enable_thinking: false });
+    assert.equal(nim.lastRequest().max_tokens, 500);
+  });
+
+  it('falls back to safe defaults for values the models would reject', async () => {
+    // "max" is a 400 on hosted Mistral Large 4; a budget must be a whole token count
+    const { proxy, nim } = await setup({ MISTRAL_REASONING_EFFORT: 'max', MINIMAX_REASONING_EFFORT: 'ultra', SUPER_VL_THINKING_BUDGET: 'lots' });
+    assert.ok(proxy.logs().includes('Ignoring SUPER_VL_THINKING_BUDGET=lots'), proxy.logs());
+    assert.ok(proxy.logs().includes('Nemotron-3.5-Super-VL thinking: up to 4096 tokens'), proxy.logs());
+
+    const res = await chat(proxy, { model: 'mistral-large-4', messages: MESSAGES });
+    assert.equal(res.status, 200);
+    assert.equal(nim.lastRequest().reasoning_effort, 'low');
+
+    await chat(proxy, { model: 'minimax-m3.1-flash', messages: MESSAGES });
+    assert.deepEqual(nim.lastRequest().chat_template_kwargs, { reasoning_effort: 'low' });
+  });
+});

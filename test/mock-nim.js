@@ -10,6 +10,14 @@
 // - deepseek-ai/deepseek-v4.1-flash: without chat_template_kwargs NIM can hang
 //   with no reply; here that is a fast 504. thinking and enable_thinking must
 //   agree, and reasoning_effort must be one every serving stack accepts.
+// - nvidia/nemotron-3.5-super-vl-120b-a12b: thinks unless enable_thinking is
+//   false.
+// - minimaxai/minimax-m3.1-flash: always thinks (adaptively).
+// - mistralai/mistral-large-4-1t-a52b: always thinks; a top-level
+//   reasoning_effort other than low/medium/high is a 400 (none means high),
+//   and the template's message rules apply: start with user/system, no system
+//   right after an assistant, no empty assistant message, and a chat ending in
+//   an assistant message needs continue_final_message (hosted NIM: a bare 400).
 //
 // GLM-5.3-Flash streams its thinking as "reasoning", the others as
 // "reasoning_content", so both field names the proxy handles get exercised.
@@ -34,12 +42,39 @@ const CATALOG = [
   'nvidia/nemotron-3.5-lightning-30b-a3b',
   'deepseek-ai/deepseek-v4.1-flash',
   'z-ai/glm-5.3',
-  'z-ai/glm-5.3-flash'
+  'z-ai/glm-5.3-flash',
+  'nvidia/nemotron-3.5-super-vl-120b-a12b',
+  'minimaxai/minimax-m3.1-flash',
+  'mistralai/mistral-large-4-1t-a52b'
 ];
 
 const GLM_MODELS = ['z-ai/glm-5.3', 'z-ai/glm-5.3-flash'];
 const DEEPSEEK_V41 = 'deepseek-ai/deepseek-v4.1-flash';
 const SAFE_DEEPSEEK_EFFORTS = ['low', 'high', 'max'];
+const SUPER_VL = 'nvidia/nemotron-3.5-super-vl-120b-a12b';
+const MINIMAX = 'minimaxai/minimax-m3.1-flash';
+const MISTRAL = 'mistralai/mistral-large-4-1t-a52b';
+
+// Mistral Large 4's template rules (it raises, which NIM returns as a 400)
+function mistralProblem(body) {
+  const effort = body.reasoning_effort ?? 'high';
+  if (!['low', 'medium', 'high'].includes(effort)) return 'reasoning_effort must be one of "low", "medium", "high"';
+  const msgs = body.messages || [];
+  if (msgs.length > 0 && !['user', 'system'].includes(msgs[0].role)) {
+    return `Conversation must start with a user or system message, got ${msgs[0].role}.`;
+  }
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m.role === 'assistant' && (m.content == null || m.content === '' || m.content.length === 0) && !m.tool_calls?.length) {
+      return 'Assistant message must have a string or a list of chunks in content or a list of tool calls.';
+    }
+    if (i > 0 && m.role === 'system' && msgs[i - 1].role === 'assistant') {
+      return "Unexpected role 'system' after role 'assistant'";
+    }
+  }
+  if (msgs.at(-1)?.role === 'assistant' && body.continue_final_message !== true) return 'Invalid request';
+  return null;
+}
 
 // Polish diacritics are multi-byte in UTF-8; the stream writer splits one of
 // them across two writes to check the proxy reassembles it correctly.
@@ -102,6 +137,21 @@ function plan(body) {
       effort: thinking ? (kwargs.reasoning_effort || 'high') : null,
       reasoningField: 'reasoning_content'
     };
+  }
+
+  if (model === SUPER_VL) {
+    const thinking = kwargs?.enable_thinking !== false;
+    return { thinking, leakReasoning: false, effort: thinking ? `budget=${kwargs?.reasoning_budget ?? 'none'}` : null, reasoningField: 'reasoning_content' };
+  }
+
+  if (model === MINIMAX) {
+    return { thinking: true, leakReasoning: false, effort: kwargs?.reasoning_effort ?? 'unset', reasoningField: 'reasoning_content' };
+  }
+
+  if (model === MISTRAL) {
+    const problem = mistralProblem(body);
+    if (problem) throw new HttpError(400, problem);
+    return { thinking: true, leakReasoning: false, effort: body.reasoning_effort ?? 'high', reasoningField: 'reasoning_content' };
   }
 
   // Other catalog models: plain replies, no thinking

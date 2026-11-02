@@ -30,6 +30,9 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 | `nemotron-3.5-lightning` | `nvidia/nemotron-3.5-lightning-30b-a3b` | Smallest, quickest Nemotron, 1M context (new here, not yet tested live) | Very Fast | Low |
 | `deepseek-v4.1-flash` | `deepseek-ai/deepseek-v4.1-flash` | Fast replies, huge context, can read images (see below) | Fast | High |
 | `glm-5.3-flash` | `z-ai/glm-5.3-flash` | Lighter, faster GLM-5.3, can read images, always thinks first | Medium | Medium |
+| `nemotron-3.5-super-vl` | `nvidia/nemotron-3.5-super-vl-120b-a12b` | NVIDIA's newest Super, can read images, thinks first (capped, see below). New, not yet tested live | Medium | not yet known |
+| `minimax-m3.1-flash` | `minimaxai/minimax-m3.1-flash` | Fast, can read images, thinks only when it needs to; 262K-token context. New, not yet tested live | Fast-Medium | not yet known |
+| `mistral-large-4` | `mistralai/mistral-large-4-1t-a52b` | Mistral's biggest model, can read images, always thinks first. New, not yet tested live | Medium-Slow | not yet known |
 
 ### Renamed and removed models
 
@@ -59,6 +62,14 @@ If your client still uses an old name, the proxy answers with an error that says
 - Set `ENABLE_THINKING_MODE=true` to turn thinking on. `DEEPSEEK_REASONING_EFFORT` (`low` / `high` / `max`, default `high`) then sets how long it thinks, and the proxy adds the same extra token room as for GLM.
 - As with GLM, the thinking stays hidden unless `SHOW_REASONING=true`.
 
+### Nemotron 3.5 Super VL, MiniMax M3.1 Flash and Mistral Large 4 notes
+
+All three think before they answer. As with GLM, the thinking is hidden unless `SHOW_REASONING=true`, and the proxy adds extra token room on top of your max tokens so the thinking can't eat the reply.
+
+- **`nemotron-3.5-super-vl`** thinks by default, and on NVIDIA it can think for a very long time (11–16K tokens on a test task). Its usual effort switches are ignored there, so the proxy caps the thinking with a budget instead: `SUPER_VL_THINKING_BUDGET` (default `4096` tokens, which is also the extra room added; `0` turns thinking off for the fastest replies).
+- **`minimax-m3.1-flash`** decides by itself whether a turn needs thinking. `MINIMAX_REASONING_EFFORT` (`low` / `medium` / `high` / `xhigh` / `max`, default `low`) sets how hard it thinks when it does. Its context is 262,144 tokens, smaller than the others; a chat that outgrows it gets a clear "chat too long" error.
+- **`mistral-large-4`** always thinks; `MISTRAL_REASONING_EFFORT` (`low` / `medium` / `high`, default `low`) sets how long. Without a setting the model would pick `high`, the slowest. Its chat format is strict, so the proxy quietly fits the messages to it: a system message right after a bot message becomes a "[System note]" from your side, empty bot messages are dropped, and a chat that ends with a bot message is continued instead of rejected.
+
 ### Filter Guide
 
 | If your RP involves... | Avoid | Use instead |
@@ -66,7 +77,7 @@ If your client still uses an old name, the proxy answers with an error that says
 | Dark themes, violence, mature content | `deepseek-v4.1-flash` (high filters due to being based in China) | `nemotron-3-ultra`, `nemotron-3.5-lightning` |
 | Fast responses needed | `glm-5.3-flash` (it thinks before replying) | `nemotron-3.5-lightning`, `deepseek-v4.1-flash` |
 | Long context / memory | — | `nemotron-3-ultra`, `glm-5.3-flash`, `deepseek-v4.1-flash` |
-| Sending images | Text-only models | `deepseek-v4.1-flash`, `glm-5.3-flash` |
+| Sending images | Text-only models | `deepseek-v4.1-flash`, `glm-5.3-flash`, `nemotron-3.5-super-vl`, `minimax-m3.1-flash`, `mistral-large-4` |
 | Testing / very fast replies | — | `nemotron-3.5-lightning` |
 
 ### No Fallback
@@ -145,6 +156,9 @@ After deploying, you can set these in your host's environment settings (Render: 
 | `SKIP_VALIDATION` | `true` | Disables startup model checks |
 | `GLM_REASONING_EFFORT` | `low` / `high` / `max` | How long `glm-5.3-flash` thinks before replying (default `low`) |
 | `DEEPSEEK_REASONING_EFFORT` | `low` / `high` / `max` | How long `deepseek-v4.1-flash` thinks when `ENABLE_THINKING_MODE=true` (default `high`) |
+| `MINIMAX_REASONING_EFFORT` | `low` / `medium` / `high` / `xhigh` / `max` | How hard `minimax-m3.1-flash` thinks (default `low`) |
+| `MISTRAL_REASONING_EFFORT` | `low` / `medium` / `high` | How long `mistral-large-4` thinks (default `low`) |
+| `SUPER_VL_THINKING_BUDGET` | tokens | The most `nemotron-3.5-super-vl` may think (default `4096`; `0` = no thinking) |
 | `REQUEST_TIMEOUT_MS` | milliseconds | How long to wait for NVIDIA, for every model (default `480000` = 8 minutes): both for it to start answering and for the longest silence in the middle of a reply. A reply that keeps streaming is never cut off |
 | `KEEPALIVE_MS` | milliseconds | How often a waiting reply gets an invisible keep-alive (default `15000`; `0` turns it off). Keep it well under 100 s on Render |
 | `INSTRUCTIONS_POSITION` | `bottom` / `top` | Where the instructions go: after the chat (default) or in the system prompt |
