@@ -37,7 +37,7 @@ async function startProxy(nimUrl, extraEnv = {}) {
   }
   for (const k of ['SHOW_REASONING', 'ENABLE_THINKING_MODE', 'SKIP_VALIDATION', 'DISCORD_WEBHOOK_URL',
     'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT', 'REQUEST_TIMEOUT_MS', 'KEEPALIVE_MS', 'RENDER_GIT_COMMIT',
-    'MINIMAX_REASONING_EFFORT', 'MISTRAL_REASONING_EFFORT', 'SUPER_VL_THINKING_BUDGET', 'DEFAULT_MAX_TOKENS',
+    'MINIMAX_REASONING_EFFORT', 'MISTRAL_REASONING_EFFORT', 'SUPER_VL_THINKING_BUDGET', 'DEFAULT_MAX_TOKENS', 'NEMOTRON_THINKING',
     'INSTRUCTIONS_PATH', 'INSTRUCTIONS_POSITION', 'LOREBOOK_PATH', 'LOREBOOK_SCAN_DEPTH', 'LOREBOOK_TOKEN_BUDGET']) {
     delete env[k];
   }
@@ -304,7 +304,10 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
       const res = await chat(proxy, { model: alias, messages: MESSAGES });
       assert.equal(res.status, 200);
       assert.equal(nim.lastRequest().model, nimId);
-      assert.equal(nim.lastRequest().chat_template_kwargs, undefined);
+      // Thinking asked for explicitly, with room for it and the family's top_p
+      assert.deepEqual(nim.lastRequest().chat_template_kwargs, { enable_thinking: true });
+      assert.equal(nim.lastRequest().top_p, 0.95);
+      assert.equal(nim.lastRequest().max_tokens, 8192 + 16384);
     }
   });
 
@@ -1042,7 +1045,7 @@ describe('a client that sets no max tokens', () => {
       assert.equal(nim.lastRequest().max_tokens, 8192 + 4096, `max_tokens=${max_tokens}`);
     }
     await chat(proxy, { model: 'nemotron-3-ultra', messages: MESSAGES, max_tokens: 0 });
-    assert.equal(nim.lastRequest().max_tokens, 8192, 'never a literal 0 to NVIDIA');
+    assert.equal(nim.lastRequest().max_tokens, 8192 + 16384, 'never a literal 0 to NVIDIA');
   });
 
   it('reads a number sent as text', async () => {
@@ -1054,11 +1057,81 @@ describe('a client that sets no max tokens', () => {
   it('uses DEFAULT_MAX_TOKENS when set, and ignores a 0 there', async () => {
     const custom = await setup({ DEFAULT_MAX_TOKENS: '3000' });
     await chat(custom.proxy, { model: 'nemotron-3-ultra', messages: MESSAGES, max_tokens: 0 });
-    assert.equal(custom.nim.lastRequest().max_tokens, 3000);
+    assert.equal(custom.nim.lastRequest().max_tokens, 3000 + 16384);
 
     const zero = await setup({ DEFAULT_MAX_TOKENS: '0' });
     assert.ok(zero.proxy.logs().includes('Ignoring DEFAULT_MAX_TOKENS=0'), zero.proxy.logs());
     await chat(zero.proxy, { model: 'nemotron-3-ultra', messages: MESSAGES });
-    assert.equal(zero.nim.lastRequest().max_tokens, 8192);
+    assert.equal(zero.nim.lastRequest().max_tokens, 8192 + 16384);
+  });
+});
+
+// ─── Nemotron thinking ─────────────────────────────────────────────────────
+
+describe('Nemotron 3 Ultra and 3.5 Lightning thinking', () => {
+  const started = [];
+  after(async () => {
+    for (const { proxy, nim } of started) {
+      await proxy.stop();
+      await nim.close();
+    }
+  });
+  const setup = async env => {
+    const nim = await startMockNim();
+    const proxy = await startProxy(nim.url, { SKIP_VALIDATION: 'true', ...env });
+    started.push({ proxy, nim });
+    return { proxy, nim };
+  };
+
+  it("keeps requests under the models' 32768-token output limit", async () => {
+    const { proxy, nim } = await setup({});
+    assert.ok(proxy.logs().includes('Nemotron-3-Ultra / 3.5-Lightning thinking: full'), proxy.logs());
+    for (const model of ['nemotron-3-ultra', 'nemotron-3.5-lightning']) {
+      await chat(proxy, { model, messages: MESSAGES, max_tokens: 30000 });
+      assert.equal(nim.lastRequest().max_tokens, 32768, model);
+    }
+    // Other models keep their bigger limit
+    await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, max_tokens: 30000 });
+    assert.equal(nim.lastRequest().max_tokens, 30000 + 4096);
+  });
+
+  it('NEMOTRON_THINKING=off turns it off, with no extra room', async () => {
+    const { proxy, nim } = await setup({ NEMOTRON_THINKING: 'off' });
+    assert.ok(proxy.logs().includes('Nemotron-3-Ultra / 3.5-Lightning thinking: OFF'), proxy.logs());
+    const res = await chat(proxy, { model: 'nemotron-3-ultra', messages: MESSAGES, max_tokens: 700 });
+    assert.equal(res.status, 200);
+    assert.deepEqual(nim.lastRequest().chat_template_kwargs, { enable_thinking: false });
+    assert.equal(nim.lastRequest().max_tokens, 700);
+    assert.equal(nim.lastRequest().top_p, 0.95);
+  });
+});
+
+// ─── How much each reply thought ───────────────────────────────────────────
+
+describe('thinking report in the log', () => {
+  let nim;
+  let proxy;
+  before(async () => {
+    nim = await startMockNim();
+    proxy = await startProxy(nim.url, { SKIP_VALIDATION: 'true' });
+  });
+  after(async () => {
+    await proxy?.stop();
+    await nim?.close();
+  });
+
+  it('logs how long a streamed reply thought before writing', async () => {
+    const res = await chat(proxy, { model: 'nemotron-3-ultra', messages: MESSAGES, stream: true });
+    await res.text();
+    const thought = Math.round(reasoningFor('nvidia/nemotron-3-ultra-550b-a55b', 'on').length / 4);
+    const reply = Math.round(answerFor('nvidia/nemotron-3-ultra-550b-a55b').length / 4);
+    await proxy.waitForLog(`[PROXY] nvidia/nemotron-3-ultra-550b-a55b done in`, 2000);
+    assert.match(proxy.logs(), new RegExp(`nemotron-3-ultra-550b-a55b done in [\\d.]+s: thought ~${thought} tokens, reply ~${reply} tokens, reply text began after [\\d.]+s`));
+  });
+
+  it('logs a plain reply with NVIDIA\'s token count, and says when there was no thinking', async () => {
+    await chat(proxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES });
+    await proxy.waitForLog('[PROXY] deepseek-ai/deepseek-v4.1-flash done in', 2000);
+    assert.match(proxy.logs(), /deepseek-v4\.1-flash done in [\d.]+s: no thinking, reply ~\d+ tokens, NVIDIA counted 22 output tokens/);
   });
 });

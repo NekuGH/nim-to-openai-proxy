@@ -10,7 +10,8 @@
 // - deepseek-ai/deepseek-v4.1-flash: without chat_template_kwargs NIM can hang
 //   with no reply; here that is a fast 504. thinking and enable_thinking must
 //   agree, and reasoning_effort must be one every serving stack accepts.
-// - nvidia/nemotron-3.5-super-vl-120b-a12b: thinks unless enable_thinking is
+// - nvidia/nemotron-3-ultra-550b-a55b, nvidia/nemotron-3.5-lightning-30b-a3b,
+//   nvidia/nemotron-3.5-super-vl-120b-a12b: think unless enable_thinking is
 //   false.
 // - minimaxai/minimax-m3.1-flash: always thinks (adaptively).
 // - mistralai/mistral-large-4-1t-a52b: always thinks; a top-level
@@ -137,6 +138,12 @@ function plan(body) {
       effort: thinking ? (kwargs.reasoning_effort || 'high') : null,
       reasoningField: 'reasoning_content'
     };
+  }
+
+  if (model === 'nvidia/nemotron-3-ultra-550b-a55b' || model === 'nvidia/nemotron-3.5-lightning-30b-a3b') {
+    // Their chat templates think unless enable_thinking is false
+    const thinking = kwargs?.enable_thinking !== false;
+    return { thinking, leakReasoning: false, effort: thinking ? 'on' : null, reasoningField: 'reasoning_content' };
   }
 
   if (model === SUPER_VL) {

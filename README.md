@@ -62,6 +62,13 @@ If your client still uses an old name, the proxy answers with an error that says
 - Set `ENABLE_THINKING_MODE=true` to turn thinking on. `DEEPSEEK_REASONING_EFFORT` (`low` / `high` / `max`, default `high`) then sets how long it thinks, and the proxy adds the same extra token room as for GLM.
 - As with GLM, the thinking stays hidden unless `SHOW_REASONING=true`.
 
+### Nemotron notes
+
+- **`nemotron-3-ultra` and `nemotron-3.5-lightning`** are asked for full thinking explicitly (not NVIDIA's "medium"), with 16K tokens of extra room for it and the family's recommended `top_p` of 0.95. Their output is capped at 32,768 tokens on NVIDIA, so requests stay under that. `NEMOTRON_THINKING=off` turns their thinking off for the quickest replies.
+- **Nemotron decides for itself how long to think, and it often thinks very little**, even at its highest setting. One live test on NVIDIA saw Ultra think only a couple of sentences before answering. Quick replies are normal for these models and don't mean thinking is off. Each reply's log line shows how much it thought (see Troubleshooting).
+- **Size matters more than version.** Nemotron 3.5 Super VL is newer than Nemotron 3 Ultra, but it's NVIDIA's mid-size tier (120B parameters, 12B active per token) against Ultra's 550B (55B active), so don't expect it to be smarter just because it's 3.5.
+- NVIDIA recommends **temperature 1.0** for Nemotron text, so set that in JanitorAI for these models.
+
 ### Nemotron 3.5 Super VL, MiniMax M3.1 Flash and Mistral Large 4 notes
 
 All three think before they answer. As with GLM, the thinking is hidden unless `SHOW_REASONING=true`, and the proxy adds extra token room on top of your max tokens so the thinking can't eat the reply.
@@ -159,6 +166,7 @@ After deploying, you can set these in your host's environment settings (Render: 
 | `MINIMAX_REASONING_EFFORT` | `low` / `medium` / `high` / `xhigh` / `max` | How hard `minimax-m3.1-flash` thinks (default `low`) |
 | `MISTRAL_REASONING_EFFORT` | `low` / `medium` / `high` | How long `mistral-large-4` thinks (default `low`) |
 | `SUPER_VL_THINKING_BUDGET` | tokens | Cap on how long `nemotron-3.5-super-vl` thinks (default: no cap, full thinking; `0` = no thinking) |
+| `NEMOTRON_THINKING` | `off` | Turns off thinking for `nemotron-3-ultra` and `nemotron-3.5-lightning` (default: full thinking) |
 | `DEFAULT_MAX_TOKENS` | tokens | The reply ceiling when your client sets no max tokens, or 0 ("unlimited" in JanitorAI). The model still stops when it's done; this only stops a runaway reply (default `8192`) |
 | `REQUEST_TIMEOUT_MS` | milliseconds | How long to wait for NVIDIA, for every model (default `480000` = 8 minutes): both for it to start answering and for the longest silence in the middle of a reply. A reply that keeps streaming is never cut off |
 | `KEEPALIVE_MS` | milliseconds | How often a waiting reply gets an invisible keep-alive (default `15000`; `0` turns it off). Keep it well under 100 s on Render |
@@ -199,6 +207,7 @@ For the `true` switches, set `false` or remove the variable to turn them off; `K
 | `NVIDIA NIM error 504` / `503` / `502` / `500` / `404` | NVIDIA's gateway gave up, was down, its server failed, or the model was briefly not served |
 | `<model> failed (attempt N) after Xs: … [content-type=…, body=… B, sent=… KB in … messages]` | One failed try at NVIDIA, with what NVIDIA sent back and how big the request was. Quote this line (and any request id in it) when asking NVIDIA for help |
 | `<model> stream error: …` | NVIDIA started a reply and then failed partway, inside the stream |
+| `<model> done in 14.2s: thought ~350 tokens, reply ~420 tokens, reply text began after 9.8s` | A finished reply: how much the model thought (or `no thinking`) and how long you waited. Use it to check whether a model really thinks |
 | `NVIDIA's reply was cut off before it finished` | NVIDIA dropped a non-streamed reply halfway |
 | `[STREAM] Upstream error` | NVIDIA went silent or dropped the connection mid-reply |
 | `Client disconnected before NVIDIA answered` / `before the reply finished` | Your client (JanitorAI) gave up or you pressed stop |
