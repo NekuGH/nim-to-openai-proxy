@@ -28,6 +28,8 @@ const GLM_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.GLM_REA
 const DEEPSEEK_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.DEEPSEEK_REASONING_EFFORT)
   ? process.env.DEEPSEEK_REASONING_EFFORT
   : 'high';
+// Nemotron 3 Ultra and 3.5 Lightning: thinking fully on (default) or off
+const NEMOTRON_THINKING = process.env.NEMOTRON_THINKING !== 'off';
 const MINIMAX_REASONING_EFFORT = ['low', 'medium', 'high', 'xhigh', 'max'].includes(process.env.MINIMAX_REASONING_EFFORT)
   ? process.env.MINIMAX_REASONING_EFFORT
   : 'low';
@@ -97,6 +99,7 @@ console.log(`[CONFIG] GLM-5.3-Flash reasoning effort: ${GLM_REASONING_EFFORT}`);
 console.log(ENABLE_THINKING_MODE
   ? `[CONFIG] DeepSeek-V4.1-Flash thinking: ON (effort ${DEEPSEEK_REASONING_EFFORT})`
   : '[CONFIG] DeepSeek-V4.1-Flash thinking: OFF');
+console.log(`[CONFIG] Nemotron-3-Ultra / 3.5-Lightning thinking: ${NEMOTRON_THINKING ? 'full' : 'OFF'}`);
 console.log(`[CONFIG] MiniMax-M3.1-Flash reasoning effort: ${MINIMAX_REASONING_EFFORT}`);
 console.log(`[CONFIG] Mistral-Large-4 reasoning effort: ${MISTRAL_REASONING_EFFORT}`);
 console.log(SUPER_VL_THINKING_BUDGET === null
@@ -262,7 +265,24 @@ const MISTRAL_OPTIONS = {
   fitMessages: fitMistralTemplate
 };
 
+// Nemotron 3 Ultra and 3.5 Lightning default to thinking in their chat
+// templates, but nothing guaranteed NVIDIA did, so it is now asked for
+// explicitly: full thinking (not medium_effort), extra room for it, and the
+// family's recommended top_p. On hosted NIM their output is documented to top
+// out at 32768 tokens, so requests stay under that. NEMOTRON_THINKING=off
+// turns thinking off for the quickest replies.
+const NEMOTRON_MAX_OUTPUT = 32768;
+const NEMOTRON_OPTIONS = {
+  requestFields: { top_p: 0.95 },
+  maxOutput: NEMOTRON_MAX_OUTPUT,
+  ...(NEMOTRON_THINKING
+    ? { chat_template_kwargs: { enable_thinking: true }, reasoningTokens: 16384 }
+    : { chat_template_kwargs: { enable_thinking: false } })
+};
+
 const MODEL_OPTIONS = {
+  'nvidia/nemotron-3-ultra-550b-a55b': NEMOTRON_OPTIONS,
+  'nvidia/nemotron-3.5-lightning-30b-a3b': NEMOTRON_OPTIONS,
   'nvidia/nemotron-3.5-super-vl-120b-a12b': SUPER_VL_OPTIONS,
   'minimaxai/minimax-m3.1-flash': MINIMAX_OPTIONS,
   'mistralai/mistral-large-4-1t-a52b': MISTRAL_OPTIONS,
@@ -578,6 +598,21 @@ const STATUS_HINTS = {
   504: 'NVIDIA gave up waiting for the model; it is overloaded. Try again later or pick another model.'
 };
 
+// One log line per finished reply saying how much the model thought, so it
+// can be checked whether a model really thinks. Lengths are estimated from
+// characters (about 4 per token) unless NVIDIA reported exact counts.
+function thinkingReport({ model, startedAt, thinkChars, replyChars, replyStartedAt, usage }) {
+  const secs = ms => `${(ms / 1000).toFixed(1)}s`;
+  const thought = usage?.completion_tokens_details?.reasoning_tokens ?? Math.round(thinkChars / 4);
+  const parts = [
+    thinkChars > 0 || thought > 0 ? `thought ~${thought} tokens` : 'no thinking',
+    `reply ~${Math.round(replyChars / 4)} tokens`
+  ];
+  if (replyStartedAt) parts.push(`reply text began after ${secs(replyStartedAt - startedAt)}`);
+  if (usage?.completion_tokens) parts.push(`NVIDIA counted ${usage.completion_tokens} output tokens`);
+  return `[PROXY] ${model} done in ${secs(Date.now() - startedAt)}: ${parts.join(', ')}`;
+}
+
 // What the client is told when the upstream call fails
 function upstreamFailure(err) {
   if (err.code === 'ECONNABORTED' && !err.response && /timeout/i.test(err.message)) {
@@ -625,6 +660,7 @@ app.get('/v1/models', (req, res) => {
 });
 
 app.post('/v1/chat/completions', async (req, res) => {
+  const startedAt = Date.now();
   let streamEndedCleanly = false;
   let upstreamStream = null;
   let keepAliveTimer = null;
@@ -710,7 +746,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     const baseRequest = {
       messages: fitted.messages,
       temperature: temperature ?? 0.7,
-      max_tokens: Math.min(replyTokens + (modelOptions.reasoningTokens || 0), MAX_TOKENS_LIMIT),
+      max_tokens: Math.min(replyTokens + (modelOptions.reasoningTokens || 0), MAX_TOKENS_LIMIT, modelOptions.maxOutput ?? Infinity),
       stream: stream || false,
       chat_template_kwargs: modelOptions.chat_template_kwargs,
       ...modelOptions.requestFields,
@@ -740,6 +776,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       const decoder = new StringDecoder('utf8');
       let buffer = '';
       let reasoningOpen = false;
+      const measured = { thinkChars: 0, replyChars: 0, replyStartedAt: null, usage: null };
       let doneSent = false;
       let cleanedUp = false;
 
@@ -772,12 +809,18 @@ app.post('/v1/chat/completions', async (req, res) => {
           if (data.error && !data.choices) {
             console.warn(`[PROXY] ${nimModel} stream error:`, data.error.message || JSON.stringify(data.error).slice(0, 300));
           }
+          if (data.usage) measured.usage = data.usage;
           const delta = data.choices?.[0]?.delta;
 
           if (delta) {
             let content = delta.content || '';
             // Some NIM backends name the field "reasoning" instead of "reasoning_content"
             const reasoning = delta.reasoning_content ?? delta.reasoning;
+            if (reasoning) measured.thinkChars += reasoning.length;
+            if (delta.content) {
+              measured.replyChars += delta.content.length;
+              measured.replyStartedAt ??= Date.now();
+            }
 
             if (SHOW_REASONING) {
               if (reasoning && !reasoningOpen) {
@@ -853,6 +896,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           writeToClient('data: [DONE]\n\n');
         }
 
+        console.log(thinkingReport({ model: nimModel, startedAt, ...measured }));
         streamEndedCleanly = true;
         if (!res.writableEnded) {
           res.end();
@@ -926,6 +970,15 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
       };
 
+      const first = response.data.choices?.[0]?.message;
+      console.log(thinkingReport({
+        model: nimModel,
+        startedAt,
+        thinkChars: (first?.reasoning_content ?? first?.reasoning ?? '').length,
+        replyChars: (first?.content ?? '').length,
+        replyStartedAt: null,
+        usage: response.data.usage
+      }));
       finishJson(200, openaiResponse);
     }
 
