@@ -19,14 +19,14 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 const CLIENT_AUTH_KEY = process.env.CLIENT_AUTH_KEY;
 
 const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
-const ENABLE_THINKING_MODE = process.env.ENABLE_THINKING_MODE === 'true';
 const SKIP_VALIDATION = process.env.SKIP_VALIDATION === 'true';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const GLM_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.GLM_REASONING_EFFORT)
   ? process.env.GLM_REASONING_EFFORT
   : 'low';
-const DEEPSEEK_REASONING_EFFORT = ['low', 'high', 'max'].includes(process.env.DEEPSEEK_REASONING_EFFORT)
-  ? process.env.DEEPSEEK_REASONING_EFFORT
+// Kimi K3.1 Pro on hosted NIM: none (no thinking) up to max; xhigh is a 400
+const KIMI_REASONING_EFFORT = ['none', 'low', 'medium', 'high', 'max'].includes(process.env.KIMI_REASONING_EFFORT)
+  ? process.env.KIMI_REASONING_EFFORT
   : 'high';
 // Nemotron 3 Ultra and 3.5 Lightning: thinking fully on (default) or off
 const NEMOTRON_THINKING = process.env.NEMOTRON_THINKING !== 'off';
@@ -94,11 +94,14 @@ console.log(KEEPALIVE_MS > 0
   ? `[CONFIG] Keep-alive: every ${KEEPALIVE_MS / 1000}s of silence`
   : '[CONFIG] Keep-alive: OFF');
 if (SHOW_REASONING) console.log('[CONFIG] Reasoning display: ENABLED');
-if (ENABLE_THINKING_MODE) console.log('[CONFIG] Thinking mode: ENABLED');
+// Settings that only ever applied to DeepSeek V4.1 Flash, retired by NVIDIA
+const LEFTOVER_SETTINGS = ['ENABLE_THINKING_MODE', 'DEEPSEEK_REASONING_EFFORT'].filter(name => process.env[name]);
+if (LEFTOVER_SETTINGS.length > 0) {
+  const several = LEFTOVER_SETTINGS.length > 1;
+  console.warn(`[CONFIG] Unused setting${several ? 's' : ''}: ${LEFTOVER_SETTINGS.join(', ')} — ${several ? 'they were' : 'it was'} for DeepSeek V4.1 Flash, which NVIDIA retired, and can be deleted`);
+}
 console.log(`[CONFIG] GLM-5.3-Flash reasoning effort: ${GLM_REASONING_EFFORT}`);
-console.log(ENABLE_THINKING_MODE
-  ? `[CONFIG] DeepSeek-V4.1-Flash thinking: ON (effort ${DEEPSEEK_REASONING_EFFORT})`
-  : '[CONFIG] DeepSeek-V4.1-Flash thinking: OFF');
+console.log(`[CONFIG] Kimi-K3.1-Pro reasoning effort: ${KIMI_REASONING_EFFORT}`);
 console.log(`[CONFIG] Nemotron-3-Ultra / 3.5-Lightning thinking: ${NEMOTRON_THINKING ? 'full' : 'OFF'}`);
 console.log(`[CONFIG] MiniMax-M3.1-Flash reasoning effort: ${MINIMAX_REASONING_EFFORT}`);
 console.log(`[CONFIG] Mistral-Large-4 reasoning effort: ${MISTRAL_REASONING_EFFORT}`);
@@ -132,8 +135,8 @@ const MODEL_MAPPING = {
   'nemotron-3-ultra': 'nvidia/nemotron-3-ultra-550b-a55b',
   'nemotron-3.5-lightning': 'nvidia/nemotron-3.5-lightning-30b-a3b',
   'nemotron-3.5-super-vl': 'nvidia/nemotron-3.5-super-vl-120b-a12b',
-  'deepseek-v4.1-flash': 'deepseek-ai/deepseek-v4.1-flash',
   'glm-5.3-flash': 'z-ai/glm-5.3-flash',
+  'kimi-k3.1-pro': 'moonshotai/kimi-k3.1-pro',
   'minimax-m3.1-flash': 'minimaxai/minimax-m3.1-flash',
   'mistral-large-4': 'mistralai/mistral-large-4-1t-a52b'
 };
@@ -142,13 +145,15 @@ const MODEL_MAPPING = {
 // switch to instead of getting a bare "Unknown model".
 const OLD_MODEL_NAMES = {
   'gpt-4': { now: 'nemotron-3-ultra' },
-  // NVIDIA retired Nemotron 3 Super on 2026-10-19 and GLM-5.3 on 2026-10-27
+  // NVIDIA retired Nemotron 3 Super on 2026-10-19, GLM-5.3 on 2026-10-27 and
+  // DeepSeek V4.1 Flash on 2026-11-16
   'nemotron-3-super': { retired: 'nvidia/nemotron-3-super-120b-a12b', try: 'nemotron-3-ultra' },
   'gpt-3.5-turbo': { retired: 'nvidia/nemotron-3-super-120b-a12b', try: 'nemotron-3-ultra' },
   'glm-5.3': { retired: 'z-ai/glm-5.3', try: 'glm-5.3-flash' },
   'glm-5.2': { retired: 'z-ai/glm-5.3', try: 'glm-5.3-flash' },
-  'gpt-4o': { retired: 'deepseek-ai/deepseek-v4-pro-0813', try: 'deepseek-v4.1-flash' },
-  'gpt-4-flash': { retired: 'deepseek-ai/deepseek-v4-flash', try: 'deepseek-v4.1-flash' },
+  'deepseek-v4.1-flash': { retired: 'deepseek-ai/deepseek-v4.1-flash', try: 'glm-5.3-flash' },
+  'gpt-4o': { retired: 'deepseek-ai/deepseek-v4-pro-0813', try: 'glm-5.3-flash' },
+  'gpt-4-flash': { retired: 'deepseek-ai/deepseek-v4-flash', try: 'glm-5.3-flash' },
   'gemini-pro': { retired: 'nvidia/llama-3.3-nemotron-super-49b-v1.5', try: 'nemotron-3.5-lightning' },
   'gpt-3.5o': { retired: 'nvidia/nemotron-mini-4b-instruct', try: 'nemotron-3.5-lightning' }
 };
@@ -171,28 +176,18 @@ const GLM_OPTIONS = {
   reasoningTokens: REASONING_TOKENS[GLM_REASONING_EFFORT]
 };
 
-// DeepSeek-V4.1-Flash thinks unless told not to, and NIM DeepSeek V4 requests
-// can hang with no reply at all when chat_template_kwargs is missing, so the
-// switch is always sent explicitly. Serving stacks disagree on its name
-// (SGLang reads "thinking", the model's own template reads "enable_thinking"),
-// so both are set. reasoning_effort is only sent while thinking, and only as
-// low/high/max — every stack accepts those, while "medium" and "xhigh" each
-// break on one of them.
-const DEEPSEEK_V41_OPTIONS = ENABLE_THINKING_MODE
-  ? {
-    chat_template_kwargs: {
-      thinking: true,
-      enable_thinking: true,
-      reasoning_effort: DEEPSEEK_REASONING_EFFORT
-    },
-    reasoningTokens: REASONING_TOKENS[DEEPSEEK_REASONING_EFFORT]
-  }
-  : {
-    chat_template_kwargs: {
-      thinking: false,
-      enable_thinking: false
-    }
-  };
+// Kimi K3.1 Pro (NVIDIA added it on 2026-11-18). On hosted NIM a top-level
+// reasoning_effort sets how long it thinks: none turns thinking off, then
+// low/medium/high/max (xhigh is a 400); high is Moonshot's default. NIM fixes
+// its top_p and penalties (the proxy never forwards those from the client)
+// and caps temperature at 1, so a higher one is lowered to 1. Up to 65536
+// output tokens.
+const KIMI_OPTIONS = {
+  requestFields: { reasoning_effort: KIMI_REASONING_EFFORT },
+  reasoningTokens: REASONING_TOKENS[KIMI_REASONING_EFFORT],
+  maxOutput: 65536,
+  maxTemperature: 1
+};
 
 // Mistral Large 4's chat template refuses (HTTP 400) a system message right
 // after an assistant one, an empty assistant message, and, on hosted NIM, a
@@ -287,7 +282,7 @@ const MODEL_OPTIONS = {
   'minimaxai/minimax-m3.1-flash': MINIMAX_OPTIONS,
   'mistralai/mistral-large-4-1t-a52b': MISTRAL_OPTIONS,
   'z-ai/glm-5.3-flash': GLM_OPTIONS,
-  'deepseek-ai/deepseek-v4.1-flash': DEEPSEEK_V41_OPTIONS
+  'moonshotai/kimi-k3.1-pro': KIMI_OPTIONS
 };
 
 // ─── Middleware ─────────────────────────────────────────────────────────────
@@ -592,6 +587,7 @@ async function callModel(baseRequest, model, signal) {
 const STATUS_HINTS = {
   401: 'NIM_API_KEY is wrong or expired — make a new key at build.nvidia.com.',
   404: "NVIDIA had nothing to serve this model with right now. That is usually a short outage on NVIDIA's side (their own playground shows the same error): try again in a minute, or switch models for a while.",
+  410: 'NVIDIA has retired this model for good, so it will not come back. Pick another model in your client.',
   500: "NVIDIA's server failed while writing the reply. This is usually temporary: try again, or pick another model.",
   502: 'NVIDIA could not reach the model. Usually temporary: try again.',
   503: 'NVIDIA has no capacity for this model right now. Try again later or pick another model.',
@@ -743,9 +739,13 @@ app.post('/v1/chat/completions', async (req, res) => {
       ? modelOptions.fitMessages(added.messages)
       : { messages: added.messages, fields: {} };
 
+    const requestedTemperature = temperature ?? 0.7;
     const baseRequest = {
       messages: fitted.messages,
-      temperature: temperature ?? 0.7,
+      // Lowered to the model's maximum where NIM has one (Kimi: 1)
+      temperature: typeof requestedTemperature === 'number' && requestedTemperature > (modelOptions.maxTemperature ?? Infinity)
+        ? modelOptions.maxTemperature
+        : requestedTemperature,
       max_tokens: Math.min(replyTokens + (modelOptions.reasoningTokens || 0), MAX_TOKENS_LIMIT, modelOptions.maxOutput ?? Infinity),
       stream: stream || false,
       chat_template_kwargs: modelOptions.chat_template_kwargs,

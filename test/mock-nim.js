@@ -7,9 +7,10 @@
 // - z-ai/glm-5.3, z-ai/glm-5.3-flash: always think. reasoning_effort other
 //   than low/high falls back to max. enable_thinking: false is ignored by the
 //   template, so the thinking leaks into the reply (as on real NIM).
-// - deepseek-ai/deepseek-v4.1-flash: without chat_template_kwargs NIM can hang
-//   with no reply; here that is a fast 504. thinking and enable_thinking must
-//   agree, and reasoning_effort must be one every serving stack accepts.
+// - moonshotai/kimi-k3.1-pro: a top-level reasoning_effort of none (no
+//   thinking), low, medium, high or max (default high; anything else, xhigh
+//   included, is a 400); top_p other than 0.95, non-zero penalties and a
+//   temperature over 1 are 400s.
 // - nvidia/nemotron-3-ultra-550b-a55b, nvidia/nemotron-3.5-lightning-30b-a3b,
 //   nvidia/nemotron-3.5-super-vl-120b-a12b: think unless enable_thinking is
 //   false.
@@ -19,6 +20,7 @@
 //   and the template's message rules apply: start with user/system, no system
 //   right after an assistant, no empty assistant message, and a chat ending in
 //   an assistant message needs continue_final_message (hosted NIM: a bare 400).
+// - Retired models (deepseek-ai/deepseek-v4.1-flash) answer 410 Gone.
 //
 // GLM-5.3-Flash streams its thinking as "reasoning", the others as
 // "reasoning_content", so both field names the proxy handles get exercised.
@@ -41,7 +43,7 @@ const CATALOG = [
   'nvidia/nemotron-3-ultra-550b-a55b',
   'nvidia/nemotron-3-super-120b-a12b',
   'nvidia/nemotron-3.5-lightning-30b-a3b',
-  'deepseek-ai/deepseek-v4.1-flash',
+  'moonshotai/kimi-k3.1-pro',
   'z-ai/glm-5.3',
   'z-ai/glm-5.3-flash',
   'nvidia/nemotron-3.5-super-vl-120b-a12b',
@@ -50,8 +52,10 @@ const CATALOG = [
 ];
 
 const GLM_MODELS = ['z-ai/glm-5.3', 'z-ai/glm-5.3-flash'];
-const DEEPSEEK_V41 = 'deepseek-ai/deepseek-v4.1-flash';
-const SAFE_DEEPSEEK_EFFORTS = ['low', 'high', 'max'];
+const KIMI = 'moonshotai/kimi-k3.1-pro';
+const KIMI_EFFORTS = ['none', 'low', 'medium', 'high', 'max'];
+// NVIDIA answers 410 Gone once a model reaches its end of life
+const RETIRED = { 'deepseek-ai/deepseek-v4.1-flash': '2026-11-16T08:00:00Z' };
 const SUPER_VL = 'nvidia/nemotron-3.5-super-vl-120b-a12b';
 const MINIMAX = 'minimaxai/minimax-m3.1-flash';
 const MISTRAL = 'mistralai/mistral-large-4-1t-a52b';
@@ -100,6 +104,9 @@ function plan(body) {
   const model = body.model;
   const kwargs = body.chat_template_kwargs;
 
+  if (RETIRED[model]) {
+    throw new HttpError(410, `The model '${model}' has reached its end of life on ${RETIRED[model]}`);
+  }
   if (!CATALOG.includes(model)) {
     throw new HttpError(404, `Function for model '${model}' Not found`);
   }
@@ -117,27 +124,16 @@ function plan(body) {
     };
   }
 
-  if (model === DEEPSEEK_V41) {
-    if (!kwargs) {
-      throw new HttpError(504, 'Simulated NIM hang: DeepSeek V4 request without chat_template_kwargs');
+  if (model === KIMI) {
+    const effort = body.reasoning_effort ?? 'high';
+    if (!KIMI_EFFORTS.includes(effort)) throw new HttpError(400, `Invalid reasoning_effort: ${effort}`);
+    if (body.top_p !== undefined && body.top_p !== 0.95) throw new HttpError(400, 'top_p is fixed at 0.95 for this model');
+    for (const k of ['presence_penalty', 'frequency_penalty']) {
+      if (body[k] !== undefined && body[k] !== 0) throw new HttpError(400, `${k} is fixed at 0 for this model`);
     }
-    const flags = [kwargs.thinking, kwargs.enable_thinking].filter(v => v !== undefined);
-    if (flags.length === 0) {
-      throw new HttpError(504, 'Simulated NIM hang: no thinking switch in chat_template_kwargs');
-    }
-    if (flags.some(v => typeof v !== 'boolean') || new Set(flags).size > 1) {
-      throw new HttpError(400, 'thinking and enable_thinking must be matching booleans');
-    }
-    const thinking = flags[0];
-    if (kwargs.reasoning_effort !== undefined && !SAFE_DEEPSEEK_EFFORTS.includes(kwargs.reasoning_effort)) {
-      throw new HttpError(400, `Invalid reasoning effort: ${kwargs.reasoning_effort}`);
-    }
-    return {
-      thinking,
-      leakReasoning: false,
-      effort: thinking ? (kwargs.reasoning_effort || 'high') : null,
-      reasoningField: 'reasoning_content'
-    };
+    if (typeof body.temperature === 'number' && body.temperature > 1) throw new HttpError(400, 'temperature must be at most 1');
+    const thinking = effort !== 'none';
+    return { thinking, leakReasoning: false, effort: thinking ? effort : null, reasoningField: 'reasoning_content' };
   }
 
   if (model === 'nvidia/nemotron-3-ultra-550b-a55b' || model === 'nvidia/nemotron-3.5-lightning-30b-a3b') {

@@ -36,7 +36,7 @@ async function startProxy(nimUrl, extraEnv = {}) {
     delete env[k];
   }
   for (const k of ['SHOW_REASONING', 'ENABLE_THINKING_MODE', 'SKIP_VALIDATION', 'DISCORD_WEBHOOK_URL',
-    'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT', 'REQUEST_TIMEOUT_MS', 'KEEPALIVE_MS', 'RENDER_GIT_COMMIT',
+    'GLM_REASONING_EFFORT', 'DEEPSEEK_REASONING_EFFORT', 'KIMI_REASONING_EFFORT', 'REQUEST_TIMEOUT_MS', 'KEEPALIVE_MS', 'RENDER_GIT_COMMIT',
     'MINIMAX_REASONING_EFFORT', 'MISTRAL_REASONING_EFFORT', 'SUPER_VL_THINKING_BUDGET', 'DEFAULT_MAX_TOKENS', 'NEMOTRON_THINKING',
     'INSTRUCTIONS_PATH', 'INSTRUCTIONS_POSITION', 'LOREBOOK_PATH', 'LOREBOOK_SCAN_DEPTH', 'LOREBOOK_TOKEN_BUDGET']) {
     delete env[k];
@@ -126,7 +126,7 @@ const MESSAGES = [
 
 // ─── Default configuration ─────────────────────────────────────────────────
 
-describe('default config (thinking hidden, DeepSeek thinking off)', () => {
+describe('default config (thinking hidden)', () => {
   let nim;
   let proxy;
 
@@ -142,10 +142,11 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
 
   const CASES = [
     {
-      alias: 'deepseek-v4.1-flash',
-      nimId: 'deepseek-ai/deepseek-v4.1-flash',
-      kwargs: { thinking: false, enable_thinking: false },
-      maxTokens: 8192
+      alias: 'kimi-k3.1-pro',
+      nimId: 'moonshotai/kimi-k3.1-pro',
+      kwargs: undefined,
+      fields: { reasoning_effort: 'high' },
+      maxTokens: 8192 + 8192
     },
     {
       alias: 'glm-5.3-flash',
@@ -264,12 +265,12 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
     assert.equal(res.status, 200);
     assert.equal(nim.lastRequest().max_tokens, 65536);
 
-    res = await chat(proxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES, max_tokens: 777 });
+    res = await chat(proxy, { model: 'kimi-k3.1-pro', messages: MESSAGES, max_tokens: 777 });
     assert.equal(res.status, 200);
-    assert.equal(nim.lastRequest().max_tokens, 777);
+    assert.equal(nim.lastRequest().max_tokens, 777 + 8192);
   });
 
-  it('forwards image content untouched to the multimodal flash models', async () => {
+  it('forwards image content untouched to the multimodal models', async () => {
     const messages = [{
       role: 'user',
       content: [
@@ -277,7 +278,7 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
         { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }
       ]
     }];
-    for (const model of ['deepseek-v4.1-flash', 'glm-5.3-flash']) {
+    for (const model of ['kimi-k3.1-pro', 'glm-5.3-flash']) {
       const res = await chat(proxy, { model, messages });
       assert.equal(res.status, 200);
       assert.deepEqual(nim.lastRequest().messages, messages);
@@ -290,9 +291,10 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
     assert.equal(res.status, 400);
     const body = await res.json();
     assert.equal(body.error.code, 'model_not_found');
-    for (const alias of ['deepseek-v4.1-flash', 'glm-5.3-flash', 'glm-5.3-flash']) {
+    for (const alias of ['kimi-k3.1-pro', 'glm-5.3-flash', 'minimax-m3.1-flash']) {
       assert.ok(body.error.message.includes(alias), `${alias} not listed`);
     }
+    assert.ok(!body.error.message.includes('deepseek'), 'a retired model must not be offered');
     assert.equal(nim.requests.length, before, 'unknown alias must not reach NIM');
   });
 
@@ -318,7 +320,8 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
       assert.equal(res.status, 400);
       assert.match((await res.json()).error.message, new RegExp(`renamed to "${now.replace('.', '\\.')}"`));
     }
-    for (const [oldName, suggestion] of [['gpt-4o', 'deepseek-v4.1-flash'], ['gpt-4-flash', 'deepseek-v4.1-flash'],
+    for (const [oldName, suggestion] of [['deepseek-v4.1-flash', 'glm-5.3-flash'],
+      ['gpt-4o', 'glm-5.3-flash'], ['gpt-4-flash', 'glm-5.3-flash'],
       ['gemini-pro', 'nemotron-3.5-lightning'], ['gpt-3.5o', 'nemotron-3.5-lightning'],
       ['nemotron-3-super', 'nemotron-3-ultra'], ['gpt-3.5-turbo', 'nemotron-3-ultra'],
       ['glm-5.3', 'glm-5.3-flash'], ['glm-5.2', 'glm-5.3-flash']]) {
@@ -353,16 +356,15 @@ describe('default config (thinking hidden, DeepSeek thinking off)', () => {
 
 // ─── Thinking enabled and shown ────────────────────────────────────────────
 
-describe('thinking on (ENABLE_THINKING_MODE, SHOW_REASONING, custom efforts)', () => {
+describe('thinking shown (SHOW_REASONING, custom efforts)', () => {
   let nim;
   let proxy;
 
   before(async () => {
     nim = await startMockNim();
     proxy = await startProxy(nim.url, {
-      ENABLE_THINKING_MODE: 'true',
       SHOW_REASONING: 'true',
-      DEEPSEEK_REASONING_EFFORT: 'max',
+      KIMI_REASONING_EFFORT: 'max',
       GLM_REASONING_EFFORT: 'high',
       SKIP_VALIDATION: 'true'
     });
@@ -374,27 +376,29 @@ describe('thinking on (ENABLE_THINKING_MODE, SHOW_REASONING, custom efforts)', (
   });
 
   it('logs the effective thinking settings', () => {
-    assert.ok(proxy.logs().includes('DeepSeek-V4.1-Flash thinking: ON (effort max)'));
+    assert.ok(proxy.logs().includes('Kimi-K3.1-Pro reasoning effort: max'));
     assert.ok(proxy.logs().includes('GLM-5.3-Flash reasoning effort: high'));
+    assert.ok(!proxy.logs().includes('Unused setting'), 'no warning without the old DeepSeek settings');
   });
 
-  it('deepseek-v4.1-flash: turns thinking on with both switches and shows it', async () => {
-    const res = await chat(proxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES });
+  it('kimi-k3.1-pro: sends KIMI_REASONING_EFFORT at the top level and shows the thinking', async () => {
+    const res = await chat(proxy, { model: 'kimi-k3.1-pro', messages: MESSAGES });
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.equal(body.choices[0].message.content, shownReasoning('deepseek-ai/deepseek-v4.1-flash', 'max'));
+    assert.equal(body.choices[0].message.content, shownReasoning('moonshotai/kimi-k3.1-pro', 'max'));
 
     const sent = nim.lastRequest();
-    assert.deepEqual(sent.chat_template_kwargs, { thinking: true, enable_thinking: true, reasoning_effort: 'max' });
+    assert.equal(sent.reasoning_effort, 'max');
+    assert.equal(sent.chat_template_kwargs, undefined);
     assert.equal(sent.max_tokens, 8192 + 16384);
     assert.ok(!('extra_body' in sent), 'extra_body must not be sent');
   });
 
-  it('deepseek-v4.1-flash: streams thinking then reply', async () => {
-    const res = await chat(proxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES, stream: true });
+  it('kimi-k3.1-pro: streams thinking then reply', async () => {
+    const res = await chat(proxy, { model: 'kimi-k3.1-pro', messages: MESSAGES, stream: true });
     assert.equal(res.status, 200);
     const chunks = parseSse(await res.text());
-    assert.equal(streamedContent(chunks), shownReasoning('deepseek-ai/deepseek-v4.1-flash', 'max'));
+    assert.equal(streamedContent(chunks), shownReasoning('moonshotai/kimi-k3.1-pro', 'max'));
   });
 
   for (const [alias, nimId] of [['glm-5.3-flash', 'z-ai/glm-5.3-flash']]) {
@@ -428,9 +432,8 @@ describe('unsupported effort values fall back to safe defaults', () => {
   before(async () => {
     nim = await startMockNim();
     proxy = await startProxy(nim.url, {
-      ENABLE_THINKING_MODE: 'true',
-      // Valid on some serving stacks but not all — the proxy must not pass them on
-      DEEPSEEK_REASONING_EFFORT: 'xhigh',
+      // Real effort names, but hosted NIM rejects them for these models
+      KIMI_REASONING_EFFORT: 'xhigh',
       GLM_REASONING_EFFORT: 'medium',
       SKIP_VALIDATION: 'true'
     });
@@ -441,12 +444,12 @@ describe('unsupported effort values fall back to safe defaults', () => {
     await nim?.close();
   });
 
-  it('deepseek-v4.1-flash falls back to high', async () => {
-    const res = await chat(proxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES });
+  it('kimi-k3.1-pro falls back to high', async () => {
+    const res = await chat(proxy, { model: 'kimi-k3.1-pro', messages: MESSAGES });
     assert.equal(res.status, 200);
-    assert.equal(nim.lastRequest().chat_template_kwargs.reasoning_effort, 'high');
+    assert.equal(nim.lastRequest().reasoning_effort, 'high');
     // Thinking stays hidden without SHOW_REASONING
-    assert.equal((await res.json()).choices[0].message.content, answerFor('deepseek-ai/deepseek-v4.1-flash'));
+    assert.equal((await res.json()).choices[0].message.content, answerFor('moonshotai/kimi-k3.1-pro'));
   });
 
   it('glm-5.3-flash falls back to low', async () => {
@@ -500,7 +503,7 @@ describe('upstream timeout', () => {
 
   it('ends a stream that goes silent mid-reply with an error chunk and [DONE]', async () => {
     const started = Date.now();
-    const res = await chat(quietProxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES, stream: true });
+    const res = await chat(quietProxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream: true });
     assert.equal(res.status, 200);
     const chunks = parseSse(await res.text());
     const elapsed = Date.now() - started;
@@ -541,6 +544,9 @@ const GONE = {
   status: 410,
   body: { status: 410, title: 'Gone', detail: "The model 'z-ai/glm-5.3-flash' has reached its end of life on 2026-12-01T09:00:00Z" }
 };
+// What the client sees for it: NVIDIA's words plus the proxy's explanation
+const GONE_MESSAGE = `NVIDIA NIM error 410 (z-ai/glm-5.3-flash): ${GONE.body.detail} — ` +
+  'NVIDIA has retired this model for good, so it will not come back. Pick another model in your client.';
 
 describe('NVIDIA errors and retries', () => {
   const started = [];
@@ -563,7 +569,7 @@ describe('NVIDIA errors and retries', () => {
       const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream });
       assert.equal(res.status, 410);
       const { error } = await res.json();
-      assert.equal(error.message, `NVIDIA NIM error 410 (z-ai/glm-5.3-flash): ${GONE.body.detail}`);
+      assert.equal(error.message, GONE_MESSAGE);
       assert.equal(nim.requests.length, 1, '410 must not be retried');
       assert.ok(proxy.logs().includes(GONE.body.detail), 'NVIDIA message missing from the log');
       // Facts for diagnosing: what NVIDIA sent back, and how big our request was
@@ -607,11 +613,11 @@ describe('NVIDIA errors and retries', () => {
       body: { message: 'Invalid request', type: 'Bad Request', code: 400, details: { type: 'context_length', limit: 262144, actual: 262323 } }
     };
     const { proxy, nim } = await setup({ failures: [TOO_LONG] });
-    const res = await chat(proxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES, stream: true });
+    const res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, stream: true });
     assert.equal(res.status, 400);
     const { error } = await res.json();
     assert.equal(error.message,
-      'NVIDIA NIM error 400 (deepseek-ai/deepseek-v4.1-flash): Invalid request: the chat plus the reply budget is 262323 tokens, ' +
+      'NVIDIA NIM error 400 (z-ai/glm-5.3-flash): Invalid request: the chat plus the reply budget is 262323 tokens, ' +
       'over this model\'s limit of 262144. Lower "Context Size" or "Max new tokens" in your client, or start a new chat');
     assert.equal(nim.requests.length, 1, 'a 400 is not retried');
   });
@@ -660,7 +666,7 @@ describe('NVIDIA errors and retries', () => {
 
   it('gives up after the one retry when NVIDIA keeps failing', async () => {
     const { proxy, nim } = await setup({ failures: [{ status: 502 }, { status: 503 }, { status: 504 }] });
-    const res = await chat(proxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES, stream: true });
+    const res = await chat(proxy, { model: 'nemotron-3-ultra', messages: MESSAGES, stream: true });
     assert.equal(res.status, 503);
     assert.equal(nim.requests.length, 2);
   });
@@ -756,7 +762,7 @@ describe('keep-alive and client hang-ups', () => {
     assert.equal(res.status, 200, 'the 200 was already sent by keep-alive');
     const body = JSON.parse(await res.text());
     assert.equal(body.error.code, 410);
-    assert.equal(body.error.message, `NVIDIA NIM error 410 (z-ai/glm-5.3-flash): ${GONE.body.detail}`);
+    assert.equal(body.error.message, GONE_MESSAGE);
     assert.equal(body.choices, undefined);
   });
 
@@ -767,7 +773,7 @@ describe('keep-alive and client hang-ups', () => {
     const chunks = parseSse(await res.text());
     assert.equal(chunks.length, 1);
     assert.equal(chunks[0].error.code, 410);
-    assert.equal(chunks[0].error.message, `NVIDIA NIM error 410 (z-ai/glm-5.3-flash): ${GONE.body.detail}`);
+    assert.equal(chunks[0].error.message, GONE_MESSAGE);
   });
 
   it('cancels the NVIDIA request when the client hangs up while waiting', async () => {
@@ -815,7 +821,7 @@ describe('a reply that mentions [DONE]', () => {
   });
 
   it('streams the whole reply instead of stopping at the word', async () => {
-    const res = await chat(proxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES, stream: true });
+    const res = await chat(proxy, { model: 'kimi-k3.1-pro', messages: MESSAGES, stream: true });
     assert.equal(streamedContent(parseSse(await res.text())), answer);
   });
 });
@@ -962,7 +968,7 @@ describe("mistral-large-4: messages are fitted to its strict template", () => {
 
 // ─── Settings for the new models ───────────────────────────────────────────
 
-describe('settings for Super VL, MiniMax and Mistral', () => {
+describe('settings for Super VL, Kimi, MiniMax and Mistral', () => {
   const started = [];
   after(async () => {
     for (const { proxy, nim } of started) {
@@ -994,6 +1000,39 @@ describe('settings for Super VL, MiniMax and Mistral', () => {
     assert.deepEqual(nim.lastRequest().chat_template_kwargs, { enable_thinking: false });
     assert.equal(nim.lastRequest().max_tokens, 500);
     assert.equal(nim.lastRequest().top_p, 0.95);
+  });
+
+  it('KIMI_REASONING_EFFORT=none turns Kimi thinking off, with no extra room', async () => {
+    const { proxy, nim } = await setup({ KIMI_REASONING_EFFORT: 'none' });
+    assert.ok(proxy.logs().includes('Kimi-K3.1-Pro reasoning effort: none'), proxy.logs());
+    const res = await chat(proxy, { model: 'kimi-k3.1-pro', messages: MESSAGES, max_tokens: 900 });
+    assert.equal(res.status, 200);
+    assert.equal(nim.lastRequest().reasoning_effort, 'none');
+    assert.equal(nim.lastRequest().max_tokens, 900);
+  });
+
+  it("lowers a temperature over 1 to Kimi's maximum of 1, and only for Kimi", async () => {
+    const { proxy, nim } = await setup({});
+    let res = await chat(proxy, { model: 'kimi-k3.1-pro', messages: MESSAGES, temperature: 1.5, stream: true });
+    assert.equal(res.status, 200);
+    await res.text();
+    assert.equal(nim.lastRequest().temperature, 1);
+
+    res = await chat(proxy, { model: 'kimi-k3.1-pro', messages: MESSAGES, temperature: 0.85 });
+    assert.equal(res.status, 200);
+    assert.equal(nim.lastRequest().temperature, 0.85);
+    assert.equal(nim.lastRequest().top_p, undefined, 'NIM fixes top_p for Kimi');
+
+    res = await chat(proxy, { model: 'glm-5.3-flash', messages: MESSAGES, temperature: 1.5 });
+    assert.equal(res.status, 200);
+    assert.equal(nim.lastRequest().temperature, 1.5);
+  });
+
+  it('says the old DeepSeek settings can be deleted', async () => {
+    const { proxy } = await setup({ ENABLE_THINKING_MODE: 'true', DEEPSEEK_REASONING_EFFORT: 'max' });
+    assert.ok(proxy.logs().includes('Unused settings: ENABLE_THINKING_MODE, DEEPSEEK_REASONING_EFFORT — they were for'), proxy.logs());
+    const one = await setup({ ENABLE_THINKING_MODE: 'true' });
+    assert.ok(one.proxy.logs().includes('Unused setting: ENABLE_THINKING_MODE — it was for'), one.proxy.logs());
   });
 
   it('caps Super VL thinking when SUPER_VL_THINKING_BUDGET is a number', async () => {
@@ -1113,7 +1152,7 @@ describe('thinking report in the log', () => {
   let proxy;
   before(async () => {
     nim = await startMockNim();
-    proxy = await startProxy(nim.url, { SKIP_VALIDATION: 'true' });
+    proxy = await startProxy(nim.url, { SKIP_VALIDATION: 'true', KIMI_REASONING_EFFORT: 'none' });
   });
   after(async () => {
     await proxy?.stop();
@@ -1130,8 +1169,8 @@ describe('thinking report in the log', () => {
   });
 
   it('logs a plain reply with NVIDIA\'s token count, and says when there was no thinking', async () => {
-    await chat(proxy, { model: 'deepseek-v4.1-flash', messages: MESSAGES });
-    await proxy.waitForLog('[PROXY] deepseek-ai/deepseek-v4.1-flash done in', 2000);
-    assert.match(proxy.logs(), /deepseek-v4\.1-flash done in [\d.]+s: no thinking, reply ~\d+ tokens, NVIDIA counted 22 output tokens/);
+    await chat(proxy, { model: 'kimi-k3.1-pro', messages: MESSAGES });
+    await proxy.waitForLog('[PROXY] moonshotai/kimi-k3.1-pro done in', 2000);
+    assert.match(proxy.logs(), /kimi-k3\.1-pro done in [\d.]+s: no thinking, reply ~\d+ tokens, NVIDIA counted 22 output tokens/);
   });
 });

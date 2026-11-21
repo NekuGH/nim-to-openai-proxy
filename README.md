@@ -1,6 +1,6 @@
 ### About this fork
 
-This is a fork of [Jontte6/nim-to-openai-proxy](https://github.com/Jontte6/nim-to-openai-proxy), whose author has stepped back (the new upstream maintainer is [skywalker14017](https://github.com/skywalker14017/nim-to-openai-proxy)). This fork goes its own way: no model fallback, per-model handling of GLM-5.3 and DeepSeek-V4.1 thinking, longer waits for an overloaded NVIDIA, lorebooks and fixed instructions, and a test suite.
+This is a fork of [Jontte6/nim-to-openai-proxy](https://github.com/Jontte6/nim-to-openai-proxy), whose author has stepped back (the new upstream maintainer is [skywalker14017](https://github.com/skywalker14017/nim-to-openai-proxy)). This fork goes its own way: no model fallback, per-model handling of each model's thinking, longer waits for an overloaded NVIDIA, lorebooks and fixed instructions, and a test suite.
 
 ### If you forked before June 7, 2026, please pull the latest version — previous versions had an auth bypass and startup DDoS vulnerability.
 
@@ -28,8 +28,8 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 |---|---|---|---|---|
 | `nemotron-3-ultra` | `nvidia/nemotron-3-ultra-550b-a55b` | Immersive RP, the most dependable model here | Fast | Low |
 | `nemotron-3.5-lightning` | `nvidia/nemotron-3.5-lightning-30b-a3b` | Smallest, quickest Nemotron, 1M context (new here, not yet tested live) | Very Fast | Low |
-| `deepseek-v4.1-flash` | `deepseek-ai/deepseek-v4.1-flash` | Fast replies, huge context, can read images (see below) | Fast | High |
 | `glm-5.3-flash` | `z-ai/glm-5.3-flash` | Lighter, faster GLM-5.3, can read images, always thinks first | Medium | Medium |
+| `kimi-k3.1-pro` | `moonshotai/kimi-k3.1-pro` | Moonshot's biggest model, 1M context, can read images, thinks first (see below). New, not yet tested live | Slow | not yet known |
 | `nemotron-3.5-super-vl` | `nvidia/nemotron-3.5-super-vl-120b-a12b` | NVIDIA's newest Super, can read images, thinks first (capped, see below). New, not yet tested live | Medium | not yet known |
 | `minimax-m3.1-flash` | `minimaxai/minimax-m3.1-flash` | Fast, can read images, thinks only when it needs to; 262K-token context. New, not yet tested live | Fast-Medium | not yet known |
 | `mistral-large-4` | `mistralai/mistral-large-4-1t-a52b` | Mistral's biggest model, can read images, always thinks first. New, not yet tested live | Medium-Slow | not yet known |
@@ -43,7 +43,8 @@ If your client still uses an old name, the proxy answers with an error that says
 | `gpt-4` | `nemotron-3-ultra` | Renamed |
 | `nemotron-3-super`, `gpt-3.5-turbo` | `nemotron-3-ultra` | NVIDIA retired Nemotron 3 Super on Oct 19 2026 |
 | `glm-5.3`, `glm-5.2` | `glm-5.3-flash` | NVIDIA retired GLM-5.3 on Oct 27 2026 (and GLM-5.2 before it) |
-| `gpt-4o`, `gpt-4-flash` | `deepseek-v4.1-flash` | NVIDIA retired DeepSeek V4 Pro and V4 Flash |
+| `deepseek-v4.1-flash` | `glm-5.3-flash` | NVIDIA retired DeepSeek V4.1 Flash on Nov 16 2026 |
+| `gpt-4o`, `gpt-4-flash` | `glm-5.3-flash` | NVIDIA retired DeepSeek V4 Pro and V4 Flash |
 | `gemini-pro`, `gpt-3.5o` | `nemotron-3.5-lightning` | NVIDIA retired Llama-3.3-Nemotron-Super-49B and Nemotron-Mini-4B |
 
 ### GLM-5.3-Flash notes
@@ -54,13 +55,13 @@ If your client still uses an old name, the proxy answers with an error that says
 - Thinking length is set by `GLM_REASONING_EFFORT`. `low` (default) is fastest and fine for RP; `high` and `max` think longer and are slower.
 - Thinking uses up tokens, so the proxy adds extra room on top of your max tokens setting (4096 for `low`, 8192 for `high`, 16384 for `max`) to avoid empty or cut-off replies.
 
-### DeepSeek-V4.1-Flash notes
+### Kimi K3.1 Pro notes
 
-`deepseek-v4.1-flash` runs DeepSeek-V4.1-Flash, with a 1M-token context, and it can read images. On its own it thinks before every reply, and NVIDIA's API can hang without ever answering if a request doesn't say whether it should think. The proxy always says so:
+`kimi-k3.1-pro` runs Moonshot's Kimi K3.1 Pro, which NVIDIA added on Nov 18 2026. It's the biggest model here (a 3T-class model), with a 1M-token context, and it can read images.
 
-- By default thinking is **off**, so replies start right away.
-- Set `ENABLE_THINKING_MODE=true` to turn thinking on. `DEEPSEEK_REASONING_EFFORT` (`low` / `high` / `max`, default `high`) then sets how long it thinks, and the proxy adds the same extra token room as for GLM.
-- As with GLM, the thinking stays hidden unless `SHOW_REASONING=true`.
+- It thinks before it replies. `KIMI_REASONING_EFFORT` sets how long: `none` (no thinking, quickest), `low`, `medium`, `high` (default, Moonshot's own default) or `max`. The proxy adds extra token room for the thinking, as for GLM (8192 for `high`, 16384 for `max`), and hides it unless `SHOW_REASONING=true`.
+- NVIDIA allows a temperature of at most 1 for this model, so a higher temperature from JanitorAI is lowered to 1 instead of being rejected. NVIDIA also fixes its `top_p` and penalties; the proxy never passes those settings on from your client anyway.
+- Being so big and so new, expect it to be slow on NVIDIA's free tier. If it answers "Not found for account", your NVIDIA account lacks the "Public API Endpoints" permission newer models can need (see Troubleshooting).
 
 ### Nemotron notes
 
@@ -81,10 +82,10 @@ All three think before they answer. As with GLM, the thinking is hidden unless `
 
 | If your RP involves... | Avoid | Use instead |
 |---|---|---|
-| Dark themes, violence, mature content | `deepseek-v4.1-flash` (high filters due to being based in China) | `nemotron-3-ultra`, `nemotron-3.5-lightning` |
-| Fast responses needed | `glm-5.3-flash` (it thinks before replying) | `nemotron-3.5-lightning`, `deepseek-v4.1-flash` |
-| Long context / memory | — | `nemotron-3-ultra`, `glm-5.3-flash`, `deepseek-v4.1-flash` |
-| Sending images | Text-only models | `deepseek-v4.1-flash`, `glm-5.3-flash`, `nemotron-3.5-super-vl`, `minimax-m3.1-flash`, `mistral-large-4` |
+| Dark themes, violence, mature content | Chinese-made models can filter more (`glm-5.3-flash` has medium filters) | `nemotron-3-ultra`, `nemotron-3.5-lightning` |
+| Fast responses needed | `glm-5.3-flash` and `kimi-k3.1-pro` (they think before replying) | `nemotron-3.5-lightning`, `minimax-m3.1-flash` |
+| Long context / memory | — | `nemotron-3-ultra`, `glm-5.3-flash`, `kimi-k3.1-pro` |
+| Sending images | Text-only models | `glm-5.3-flash`, `kimi-k3.1-pro`, `nemotron-3.5-super-vl`, `minimax-m3.1-flash`, `mistral-large-4` |
 | Testing / very fast replies | — | `nemotron-3.5-lightning` |
 
 ### No Fallback
@@ -98,7 +99,7 @@ A model name that isn't in the table above is rejected with an "Unknown model" e
 
 ### Waiting on NVIDIA
 
-NVIDIA's free tier is often overloaded. GLM and DeepSeek have been measured taking 1 to 3+ minutes before they send the first word. The proxy is built for that:
+NVIDIA's free tier is often overloaded. GLM has been measured taking 1 to 3+ minutes before it sends the first word. The proxy is built for that:
 
 - It waits up to **8 minutes** (`REQUEST_TIMEOUT_MS`) for NVIDIA to start answering, and allows up to 8 minutes of silence mid-reply. A reply that keeps streaming is never cut off.
 - While a reply hasn't started, it sends a small "keep-alive" every 15 seconds (`KEEPALIVE_MS`): a comment line for streamed replies, a blank line before the JSON otherwise. Both are invisible in the chat. This matters on Render, which runs every service behind Cloudflare: Cloudflare drops a request that hasn't started answering within about 100 seconds, and the browser then only shows "NetworkError when attempting to fetch resource". GLM often thinks longer than that before its first word.
@@ -158,11 +159,10 @@ After deploying, you can set these in your host's environment settings (Render: 
 | Variable | Value | Effect |
 |---|---|---|
 | `SHOW_REASONING` | `true` | Shows model reasoning in `<thinking>` tags |
-| `ENABLE_THINKING_MODE` | `true` | Turns thinking on for `deepseek-v4.1-flash` |
 | `DISCORD_WEBHOOK_URL` | Webhook URL | Alerts you when models fail validation |
 | `SKIP_VALIDATION` | `true` | Disables startup model checks |
 | `GLM_REASONING_EFFORT` | `low` / `high` / `max` | How long `glm-5.3-flash` thinks before replying (default `low`) |
-| `DEEPSEEK_REASONING_EFFORT` | `low` / `high` / `max` | How long `deepseek-v4.1-flash` thinks when `ENABLE_THINKING_MODE=true` (default `high`) |
+| `KIMI_REASONING_EFFORT` | `none` / `low` / `medium` / `high` / `max` | How long `kimi-k3.1-pro` thinks (default `high`; `none` = no thinking) |
 | `MINIMAX_REASONING_EFFORT` | `low` / `medium` / `high` / `xhigh` / `max` | How hard `minimax-m3.1-flash` thinks (default `low`) |
 | `MISTRAL_REASONING_EFFORT` | `low` / `medium` / `high` | How long `mistral-large-4` thinks (default `low`) |
 | `SUPER_VL_THINKING_BUDGET` | tokens | Cap on how long `nemotron-3.5-super-vl` thinks (default: no cap, full thinking; `0` = no thinking) |
@@ -177,7 +177,7 @@ After deploying, you can set these in your host's environment settings (Render: 
 | `LOREBOOK_TOKEN_BUDGET` | number | Roughly how many tokens of lore can be added per message (default `2048`) |
 
 
-For the `true` switches, set `false` or remove the variable to turn them off; `KEEPALIVE_MS=0` turns keep-alive off. The proxy reads these when it starts, so a change takes effect after the next deploy (on Render, "Save and deploy"). A value it can't use is ignored with a warning in the log.
+`ENABLE_THINKING_MODE` and `DEEPSEEK_REASONING_EFFORT` were for the retired DeepSeek V4.1 Flash and no longer do anything; the log reminds you if they're still set, and you can delete them. For the `true` switches, set `false` or remove the variable to turn them off; `KEEPALIVE_MS=0` turns keep-alive off. The proxy reads these when it starts, so a change takes effect after the next deploy (on Render, "Save and deploy"). A value it can't use is ignored with a warning in the log.
 
 ### Troubleshooting
 
@@ -191,9 +191,9 @@ For the `true` switches, set `false` or remove the variable to turn them off; `K
 | "NVIDIA NIM error 429 (model) …" | NVIDIA is rate-limiting your API key (the proxy already waited and retried twice) | Wait a few minutes; NVIDIA's free tier sometimes throttles a key for longer |
 | "NVIDIA NIM error 500 (model): Internal error while making inference request…" | NVIDIA's own server failed while writing the reply (the proxy already retried once) | Usually temporary: regenerate, or switch models for a while |
 | "Unknown model" / "has been renamed" / "was removed" error | Model name in your client isn't in the Model Mapping table | Use the name the error suggests, or one from the table, e.g. `glm-5.3-flash` |
-| Very slow responses | Using `glm-5.3-flash` (it thinks first) or Chinese models during peak hours | Switch to `nemotron-3.5-lightning` or `nemotron-3-ultra` |
-| "NVIDIA did not start answering within 480s" | NVIDIA's free tier is overloaded for that model (common for `deepseek-v4.1-flash` and the GLMs) | Try again later or switch models — the proxy never swaps models for you |
-| "NVIDIA NIM error 410 (model): … reached its end of life" | NVIDIA retired that model | Pick another model; the error names the retired one |
+| Very slow responses | Using a model that thinks first (`glm-5.3-flash`, `kimi-k3.1-pro`) or Chinese models during peak hours | Switch to `nemotron-3.5-lightning` or `nemotron-3-ultra`, or lower that model's reasoning effort |
+| "NVIDIA did not start answering within 480s" | NVIDIA's free tier is overloaded for that model (common for the thinking models) | Try again later or switch models — the proxy never swaps models for you |
+| "NVIDIA NIM error 410 (model): … reached its end of life — NVIDIA has retired this model for good" | NVIDIA retired that model; it happens every few weeks | Pick another model from the table above; the proxy gets updated to drop it |
 | Filter interrupts RP | Using Chinese-hosted model for mature content | Use one of the `nemotron-…` models |
 | "Forbidden: Invalid or missing authentication" (403) | The API key in your client doesn't match `CLIENT_AUTH_KEY` | Make them identical, then reload the client page |
 | "A network error occurred… NetworkError when attempting to fetch resource", only with slow models (GLM) | Render's Cloudflare edge cut a reply that hadn't started within ~100 s | Fixed by the keep-alive above; make sure `KEEPALIVE_MS` isn't `0` |
