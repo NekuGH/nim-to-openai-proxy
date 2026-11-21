@@ -42,27 +42,24 @@ const HEADROOM = { low: 4096, high: 8192, max: 16384 };
 const glm = effort => ({ reasoning_effort: effort, clear_thinking: true });
 
 const PROFILES = {
-  'ds41-off': {
-    model: 'deepseek-ai/deepseek-v4.1-flash',
-    kwargs: { thinking: false, enable_thinking: false },
-    maxTokens: REPLY_TOKENS
-  },
-  'ds41-high': {
-    model: 'deepseek-ai/deepseek-v4.1-flash',
-    kwargs: { thinking: true, enable_thinking: true, reasoning_effort: 'high' },
-    maxTokens: REPLY_TOKENS + HEADROOM.high
-  },
-  // No chat_template_kwargs at all: checks the reported NIM hang
-  'ds41-bare': {
-    model: 'deepseek-ai/deepseek-v4.1-flash',
-    kwargs: undefined,
-    maxTokens: REPLY_TOKENS
-  },
+  // Kimi takes its effort as a top-level field; none turns thinking off
+  'kimi-high': { model: 'moonshotai/kimi-k3.1-pro', fields: { reasoning_effort: 'high' }, maxTokens: REPLY_TOKENS + HEADROOM.high },
+  'kimi-none': { model: 'moonshotai/kimi-k3.1-pro', fields: { reasoning_effort: 'none' }, maxTokens: REPLY_TOKENS },
   'glm53f-low': { model: 'z-ai/glm-5.3-flash', kwargs: glm('low'), maxTokens: REPLY_TOKENS + HEADROOM.low },
   'glm53f-high': { model: 'z-ai/glm-5.3-flash', kwargs: glm('high'), maxTokens: REPLY_TOKENS + HEADROOM.high },
-  // Nemotron gets no per-model options from the proxy: the model's defaults
-  'nemo-ultra': { model: 'nvidia/nemotron-3-ultra-550b-a55b', kwargs: undefined, maxTokens: REPLY_TOKENS },
-  'nemo-light': { model: 'nvidia/nemotron-3.5-lightning-30b-a3b', kwargs: undefined, maxTokens: REPLY_TOKENS },
+  // Nemotron: thinking asked for explicitly, with the family's top_p
+  'nemo-ultra': {
+    model: 'nvidia/nemotron-3-ultra-550b-a55b',
+    kwargs: { enable_thinking: true },
+    fields: { top_p: 0.95 },
+    maxTokens: REPLY_TOKENS + 16384
+  },
+  'nemo-light': {
+    model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
+    kwargs: { enable_thinking: true },
+    fields: { top_p: 0.95 },
+    maxTokens: REPLY_TOKENS + 16384
+  },
   'super-vl': {
     model: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
     kwargs: { enable_thinking: true, reasoning_budget: 4096 },
